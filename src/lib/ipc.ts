@@ -27,6 +27,46 @@ export interface DashScopeSettings {
   region: "china" | "international";
 }
 
+/** A word the engine should get right: a name, a term, or a fix for a mishearing. */
+export interface DictionaryEntry {
+  /** Empty for a word not saved yet. */
+  id: string;
+  /** How to write it. */
+  word: string;
+  /** What the engine hears instead, replaced after recognition. */
+  soundsLike: string[];
+  kind: "term" | "person";
+  boost: "normal" | "strong";
+  /** App names it applies in; empty for every app. */
+  apps: string[];
+}
+
+/** The most dictionary words: speechkit's limit on hotwords. */
+export const MAX_WORDS = 256;
+
+export type Tone = "formal" | "casual" | "asSpoken" | "literal";
+export type PolishProvider = "local" | "openAi" | "dashScope";
+
+export interface PolishSettings {
+  enabled: boolean;
+  removeFillers: boolean;
+  selfCorrections: boolean;
+  formatLists: boolean;
+  appTone: boolean;
+  translate: boolean;
+  /** The language to translate into, by its English name. */
+  translateTo: string;
+  /** Where the language model runs: an OpenAI-compatible server. */
+  provider: PolishProvider;
+  /** For a local server, such as Ollama or LM Studio. */
+  baseUrl: string;
+  /** Empty until the user names one: Viary never picks a model. */
+  model: string;
+  tones: { app: string; tone: Tone }[];
+  /** The tone in apps without their own. */
+  defaultTone: Tone;
+}
+
 export interface Settings {
   localModels: LocalModel[];
   activeEngine: string | null;
@@ -40,6 +80,8 @@ export interface Settings {
   keepRecordingsDays: number;
   openai: OpenAiSettings;
   dashscope: DashScopeSettings;
+  dictionary: DictionaryEntry[];
+  polish: PolishSettings;
 }
 
 export interface EngineInfo {
@@ -50,6 +92,8 @@ export interface EngineInfo {
   live: boolean;
   punctuation: "native" | "model" | "none";
   languageOverride: boolean;
+  /** How it uses the dictionary. */
+  dictionary: "hotwords" | "prompt" | "replacements";
 }
 
 export interface EngineStatus {
@@ -160,6 +204,10 @@ export const api = {
   saveApiKey: (provider: Provider, key: string) => invoke<void>("save_api_key", { provider, key }),
   deleteApiKey: (provider: Provider) => invoke<void>("delete_api_key", { provider }),
   setPreferences: (prefs: Preferences) => invoke<void>("set_preferences", { prefs }),
+  saveWord: (entry: DictionaryEntry) => invoke<string>("dictionary_save", { entry }),
+  removeWord: (id: string) => invoke<void>("dictionary_remove", { id }),
+  setPolish: (polish: PolishSettings) => invoke<void>("set_polish", { polish }),
+  polishPreview: (app: string, text: string) => invoke<string>("polish_preview", { target: app, text }),
   history,
   deleteHistory: (id: string) => invoke<void>("history_delete", { id }),
   retranscribe: (id: string) => invoke<void>("history_retranscribe", { id }),
@@ -204,6 +252,13 @@ export function engineName(snapshot: Snapshot, id: string): string {
   if (id === "dashscope") return "DashScope";
   const local = snapshot.settings.localModels.find((m) => `local:${m.id}` === id);
   return local?.name ?? "engine";
+}
+
+/** App names seen in History, most used first. */
+export function knownApps(history: HistoryItem[] | null): string[] {
+  const counts = new Map<string, number>();
+  for (const h of history ?? []) if (h.app) counts.set(h.app, (counts.get(h.app) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([app]) => app);
 }
 
 export function formatBytes(bytes: number): string {

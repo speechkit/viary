@@ -1,12 +1,14 @@
 //! Viary: hold a key, speak, and the words are typed where the cursor is.
 
 mod dictation;
+mod dictionary;
 mod engines;
 mod history;
 mod icons;
 mod keychain;
 #[cfg(target_os = "macos")]
 mod macos;
+mod polish;
 mod reload;
 mod settings;
 mod tap;
@@ -29,7 +31,8 @@ use crate::{
     keychain::Provider,
     macos::{hotkey::HotkeyListener, permissions},
     settings::{
-        DashScopeSettings, Hotkey, Language, LocalModel, OpenAiSettings, Settings, SettingsStore,
+        DashScopeSettings, DictionaryEntry, Hotkey, Language, LocalModel, OpenAiSettings,
+        PolishSettings, Settings, SettingsStore,
     },
 };
 
@@ -412,6 +415,83 @@ fn set_preferences(app: AppHandle, state: State<'_, App>, prefs: Preferences) ->
 }
 
 // ---------------------------------------------------------------------------
+// Dictionary and polish
+
+impl App {
+    /// Reloads the engine after the dictionary changed, if it loads the
+    /// words (as hotwords or a prompt) and they changed.
+    fn dictionary_changed(&self, app: &AppHandle, before: &[DictionaryEntry]) {
+        let after = self.settings().dictionary;
+        if dictionary::load_inputs(before) == dictionary::load_inputs(&after) {
+            return;
+        }
+        let status = self.engines.status();
+        let settled = status.loading.is_none() && status.failed.is_none();
+        if settled && status.active.is_some_and(|info| info.dictionary == "replacements") {
+            return;
+        }
+        self.reload_if_active(app, |id| id.starts_with("local:") || id == engines::OPENAI);
+    }
+}
+
+/// Adds a word, or replaces the one with its id, and returns its id.
+#[tauri::command]
+fn dictionary_save(app: AppHandle, state: State<'_, App>, entry: DictionaryEntry) -> CmdResult<String> {
+    let mut entry = dictionary::tidy(entry)?;
+    let before = state.settings().dictionary;
+    let is_new = !before.iter().any(|e| e.id == entry.id);
+    if is_new && before.len() >= dictionary::MAX_WORDS {
+        return Err(format!("the dictionary holds up to {} words", dictionary::MAX_WORDS));
+    }
+    if let Some(same) = before
+        .iter()
+        .find(|e| e.id != entry.id && e.word.eq_ignore_ascii_case(&entry.word))
+    {
+        return Err(format!("“{}” is already in the dictionary", same.word));
+    }
+    if is_new {
+        entry.id = history::now_ms().to_string();
+    }
+    let id = entry.id.clone();
+    state.change(|s| match s.dictionary.iter_mut().find(|e| e.id == entry.id) {
+        Some(existing) => *existing = entry,
+        None => s.dictionary.push(entry),
+    });
+    state.dictionary_changed(&app, &before);
+    ui::refresh(&app);
+    Ok(id)
+}
+
+#[tauri::command]
+fn dictionary_remove(app: AppHandle, state: State<'_, App>, id: String) {
+    let before = state.settings().dictionary;
+    state.change(|s| s.dictionary.retain(|e| e.id != id));
+    state.dictionary_changed(&app, &before);
+    ui::refresh(&app);
+}
+
+#[tauri::command]
+fn set_polish(app: AppHandle, state: State<'_, App>, mut polish: PolishSettings) {
+    polish.model = polish.model.trim().to_owned();
+    polish.base_url = polish.base_url.trim().to_owned();
+    polish.tones.retain(|t| !t.app.trim().is_empty());
+    state.change(|s| s.polish = polish);
+    ui::refresh(&app);
+}
+
+/// Polishes `text` as if dictated into `app`, for the Polish page.
+#[tauri::command]
+async fn polish_preview(app: AppHandle, target: String, text: String) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = app.state::<App>().settings();
+        let text = dictionary::apply(&settings.dictionary, &target, &text);
+        polish::request(&settings, &target)?.run(&text, polish::TIMEOUT)
+    })
+    .await
+    .map_err(err)?
+}
+
+// ---------------------------------------------------------------------------
 // History
 
 #[derive(Serialize)]
@@ -459,14 +539,21 @@ async fn history_retranscribe(app: AppHandle, id: String) -> CmdResult<()> {
             .current()
             .ok_or("choose a voice engine first")?;
         let audio = read_wav_pcm16(&path).map_err(|e| engines::describe(&e))?;
-        let options = dictation::session_options(&state.settings(), &loaded.info);
+        let settings = state.settings();
+        let options = loaded.session_options(&settings, &entry.app);
         let outcome = loaded
             .engine
             .transcribe(&audio, options, Instant::now() + Duration::from_secs(300))
             .map_err(|failure| engines::describe(&failure.error))?;
         let segments = dictation::texts(&outcome.transcript);
         let raw = engines::join(&segments);
-        let text = loaded.finish_text(&segments);
+        let mut text = dictation::finish(&settings, &entry.app, Some(&loaded), &segments);
+        if polish::applies(&settings, &entry.app) {
+            match polish::request(&settings, &entry.app).and_then(|r| r.run(&text, polish::TIMEOUT)) {
+                Ok(polished) => text = polished,
+                Err(error) => tracing::warn!(%error, "polish failed; keeping the text as recognized"),
+            }
+        }
         state.history.update(&id, |entry| {
             entry.punctuated = (text != raw).then(|| text.clone());
             entry.text = text;
@@ -643,6 +730,10 @@ pub fn run() {
             save_api_key,
             delete_api_key,
             set_preferences,
+            dictionary_save,
+            dictionary_remove,
+            set_polish,
+            polish_preview,
             history_list,
             history_delete,
             history_retranscribe,

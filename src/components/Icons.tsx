@@ -63,6 +63,7 @@ const paths = {
   refresh: "M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6",
   trash: "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13",
   shield: "M12 3l8 3v6c0 5-3.5 8-8 9c-4.5-1-8-4-8-9V6z",
+  translate: "M4 5h8M8 3v2M6 5c0 4 3 7 6 8M10 5c-1 4-4 7-6 8M13 21l4-9 4 9M14.5 18h5",
 } as const;
 
 export type IconName = keyof typeof paths;

@@ -4,18 +4,20 @@ import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import { Icon, Mark, type IconName } from "../components/Icons";
 import { useSnapshot, type Snapshot } from "../lib/ipc";
+import { DictionaryPage } from "../pages/Dictionary";
 import { EnginePage } from "../pages/Engine";
 import { HistoryPage } from "../pages/History";
 import { HomePage } from "../pages/Home";
+import { PolishPage } from "../pages/Polish";
 import { SettingsPage } from "../pages/Settings";
 
-type Page = "home" | "history" | "engine" | "settings";
+type Page = "home" | "history" | "dictionary" | "polish" | "engine" | "settings";
 
-const NAV: { id: Page | "dictionary" | "polish"; label: string; icon: IconName; soon?: boolean }[] = [
+const NAV: { id: Page; label: string; icon: IconName }[] = [
   { id: "home", label: "Home", icon: "home" },
   { id: "history", label: "History", icon: "history" },
-  { id: "dictionary", label: "Dictionary", icon: "dictionary", soon: true },
-  { id: "polish", label: "Polish & tone", icon: "sparkle", soon: true },
+  { id: "dictionary", label: "Dictionary", icon: "dictionary" },
+  { id: "polish", label: "Polish & tone", icon: "sparkle" },
   { id: "engine", label: "Voice engine", icon: "engine" },
   { id: "settings", label: "Settings", icon: "settings" },
 ];
@@ -68,17 +70,15 @@ function Sidebar({ page, go, s }: { page: Page; go: (p: Page) => void; s: Snapsh
           <button
             key={item.id}
             type="button"
-            disabled={item.soon}
             aria-current={current ? "page" : undefined}
-            onClick={() => !item.soon && go(item.id as Page)}
+            onClick={() => go(item.id)}
             className={
               "flex h-[38px] items-center gap-2.5 rounded-[9px] px-2.5 text-left text-sm font-medium " +
-              (current ? "bg-card text-ink" : item.soon ? "text-muted/50" : "text-muted hover:bg-card/60")
+              (current ? "bg-card text-ink" : "text-muted hover:bg-card/60")
             }
           >
             <Icon name={item.icon} size={18} strokeWidth={1.7} />
             <span className="grow">{item.label}</span>
-            {item.soon && <span className="text-[11px] font-normal">Soon</span>}
           </button>
         );
       })}
@@ -112,6 +112,8 @@ export function MainWindow() {
         <div data-tauri-drag-region className="absolute inset-x-0 top-0 h-[28px]" />
         {page === "home" && <HomePage s={s} go={setPage} />}
         {page === "history" && <HistoryPage s={s} focus={focusEntry} />}
+        {page === "dictionary" && <DictionaryPage s={s} />}
+        {page === "polish" && <PolishPage s={s} />}
         {page === "engine" && <EnginePage s={s} />}
         {page === "settings" && <SettingsPage s={s} />}
       </div>

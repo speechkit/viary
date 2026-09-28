@@ -20,12 +20,12 @@ use std::collections::BTreeMap;
 
 use speechkit::{
     AudioBuffer, SpeechError,
-    asr::{AsrSession, SessionOptions, Transcript, Update, UtteranceId},
+    asr::{AsrSession, Transcript, Update, UtteranceId},
 };
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
-    App,
+    App, dictionary,
     engines::{self, DASHSCOPE, EngineInfo, LoadedEngine, OPENAI, describe},
     history::{self, EngineLabel, Entry, Status},
     keychain::{self, Provider},
@@ -35,6 +35,7 @@ use crate::{
         hotkey::HotkeyEvent,
         keys, pasteboard, permissions,
     },
+    polish,
     settings::{Hotkey, Settings},
     tap::{Engine, EngineSlot, PumpEvent, Recording},
     ui::{self, TrayState},
@@ -122,6 +123,8 @@ pub enum Msg {
     Started(u64, Result<Arc<AsrSession>, Arc<SpeechError>>),
     /// Recognition for `token` ended.
     Finished(u64, Transcribed),
+    /// The polish model rewrote the text of `token`, or gave up.
+    Polished(u64, Polished),
     /// The switch to engine `id` asked for by the Failed pill ended.
     Switched(u64, String, Result<EngineInfo, String>),
     /// A timed state ends: hide the pill if `token` is still current.
@@ -133,6 +136,15 @@ pub struct Transcribed {
     result: Result<Vec<String>, SpeechError>,
     audio: Arc<AudioBuffer>,
     engine: Option<Arc<LoadedEngine>>,
+}
+
+/// Text back from the polish step, ready to insert.
+pub struct Polished {
+    text: String,
+    raw: String,
+    info: Option<EngineInfo>,
+    /// Why the text is not polished, when the model failed.
+    note: Option<&'static str>,
 }
 
 /// One dictation, from key release until its text lands or it fails.
@@ -229,6 +241,12 @@ impl Controller {
                     self.stream_partials(token, started)
                 }
                 Msg::Finished(token, done) if token == self.token => self.finished(done),
+                Msg::Polished(token, polished) if token == self.token => {
+                    if let Phase::Busy(job) = std::mem::replace(&mut self.phase, Phase::Idle) {
+                        let Polished { text, raw, info, note } = polished;
+                        self.insert(job, text, raw, info.as_ref(), note);
+                    }
+                }
                 Msg::Switched(token, id, outcome) if token == self.token => {
                     self.switched(id, outcome)
                 }
@@ -317,7 +335,7 @@ impl Controller {
             }
         };
         // Opening a session may connect to a service: never on this thread.
-        let options = session_options(&settings, &engine.info);
+        let options = engine.session_options(&settings, &target.name);
         let (session_engine, mailbox, session_slot) =
             (engine.clone(), self.mailbox.clone(), slot.clone());
         std::thread::spawn(move || {
@@ -458,17 +476,49 @@ impl Controller {
                     self.hint("No speech detected");
                     return;
                 }
-                let text = done
-                    .engine
-                    .as_ref()
-                    .map_or_else(|| raw.clone(), |e| e.finish_text(&segments));
-                self.insert(job, text, raw, info.as_ref());
+                let settings = self.settings();
+                let text = finish(&settings, &job.target.name, done.engine.as_deref(), &segments);
+                if polish::applies(&settings, &job.target.name) {
+                    self.polish(job, &settings, text, raw, info);
+                } else {
+                    self.insert(job, text, raw, info.as_ref(), None);
+                }
             }
             Err(error) => self.fail(job, &error, info.as_ref()),
         }
     }
 
-    fn insert(&mut self, job: Job, text: String, raw: String, info: Option<&EngineInfo>) {
+    /// Sends `text` through the polish model, then inserts it. The pill
+    /// says so meanwhile; a model that fails or is not set up leaves the
+    /// text as recognized.
+    fn polish(&mut self, job: Job, settings: &Settings, text: String, raw: String, info: Option<EngineInfo>) {
+        let request = match polish::request(settings, &job.target.name) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(%error, "polish is on but cannot run");
+                self.insert(job, text, raw, info.as_ref(), Some("not polished"));
+                return;
+            }
+        };
+        let token = self.token;
+        self.show(PillView::Transcribing {
+            label: "Polishing".into(),
+        });
+        self.phase = Phase::Busy(job);
+        let mailbox = self.mailbox.clone();
+        std::thread::spawn(move || {
+            let (text, note) = match request.run(&text, polish::TIMEOUT) {
+                Ok(polished) => (polished, None),
+                Err(error) => {
+                    tracing::warn!(%error, "polish failed; inserting the text as recognized");
+                    (text, Some("not polished"))
+                }
+            };
+            let _ = mailbox.send(Msg::Polished(token, Polished { text, raw, info, note }));
+        });
+    }
+
+    fn insert(&mut self, job: Job, text: String, raw: String, info: Option<&EngineInfo>, note: Option<&str>) {
         let delivery = deliver(&self.app, &text, &job.target);
         let status = match delivery {
             Delivery::Pasted => Status::Inserted,
@@ -495,6 +545,10 @@ impl Controller {
                     } else {
                         " · cloud"
                     });
+                }
+                if let Some(note) = note {
+                    label.push_str(" · ");
+                    label.push_str(note);
                 }
                 self.show(PillView::Inserted {
                     label,
@@ -727,7 +781,7 @@ impl Controller {
         self.show(PillView::Transcribing {
             label: format!("Retrying with {}", engine.info.name),
         });
-        let options = session_options(&self.settings(), &engine.info);
+        let options = engine.session_options(&self.settings(), &job.target.name);
         self.phase = Phase::Busy(job);
         let mailbox = self.mailbox.clone();
         std::thread::spawn(move || {
@@ -822,13 +876,16 @@ fn deliver(app: &AppHandle, text: &str, target: &TargetApp) -> Delivery {
     Delivery::Pasted
 }
 
-/// Session options with the chosen language, when the engine takes one.
-pub fn session_options(settings: &Settings, info: &EngineInfo) -> SessionOptions {
-    let options = SessionOptions::default();
-    match settings.language.code() {
-        Some(code) if info.language_override => options.with_language(code),
-        _ => options,
-    }
+/// The text to insert for `segments` dictated into `app`: dictionary
+/// replacements, the engine's punctuation model if it has one, then the
+/// dictionary again, to restore its spellings after punctuation.
+pub fn finish(settings: &Settings, app: &str, engine: Option<&LoadedEngine>, segments: &[String]) -> String {
+    let fixed: Vec<String> = segments
+        .iter()
+        .map(|s| dictionary::apply(&settings.dictionary, app, s))
+        .collect();
+    let text = engine.map_or_else(|| engines::join(&fixed), |e| e.finish_text(&fixed));
+    dictionary::apply(&settings.dictionary, app, &text)
 }
 
 pub fn texts(transcript: &Transcript) -> Vec<String> {
@@ -1044,6 +1101,7 @@ mod tests {
             live: false,
             punctuation: "native",
             language_override: true,
+            dictionary: "prompt",
         };
         let (message, retry) = failure_message(
             &SpeechError::backend("openai-http", true, "reset"),

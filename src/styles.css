@@ -93,6 +93,12 @@ button:not(:disabled) {
   outline-offset: 2px;
 }
 
+/* Text fields show focus with their own dark border. */
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
 @keyframes pulse-dot {
   0%,
   100% {

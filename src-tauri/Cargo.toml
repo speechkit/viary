@@ -22,6 +22,8 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 speechkit = { version = "0.3", features = ["sherpa", "openai", "dashscope", "capture"] }
+# Blocking HTTP for the polish model, called from worker threads.
+ureq = { version = "2.12", features = ["json"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

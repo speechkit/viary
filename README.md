@@ -27,6 +27,8 @@ The first run opens the main window. Then:
 | API keys in the Keychain (`app.viary.api-key`); never sent to the web view | `src-tauri/src/keychain.rs` |
 | Pasting: the pasteboard is saved, ⌘V posted, then restored; without a focused text field the text stays on the clipboard | `src-tauri/src/macos/` |
 | History and recordings, kept for the chosen number of days | `src-tauri/src/history.rs` |
+| Dictionary: hotwords for transducers (with `bpe.vocab`, or Chinese-character models), a prompt for Qwen3-ASR, FunASR-Nano and OpenAI file mode, and "When I say" replacements after recognition for every engine | `src-tauri/src/dictionary.rs` |
+| Polish & tone: an OpenAI-compatible chat model (a local server such as Ollama, OpenAI, or DashScope) rewrites the text before it is pasted, with a tone per app; if it fails, the text goes in as recognized | `src-tauri/src/polish.rs` |
 
 Punctuation: engines that punctuate natively (SenseVoice, cloud) are used as-is. For the others, an optional sherpa-onnx punctuation model runs after the session, so "Use raw" can put back the recognizer's own text.
 
@@ -44,4 +46,4 @@ The ignored tests need `sherpa-onnx-streaming-zipformer-en-2023-06-26`, `sherpa-
 
 ## Not yet
 
-Polish and tone, translation, hands-free (double-tap), speak-to-edit, the dictionary, and crash isolation through `speechkit-worker`.
+Hands-free (double-tap), speak-to-edit, learning dictionary words from your corrections, and crash isolation through `speechkit-worker`.

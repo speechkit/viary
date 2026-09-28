@@ -16,18 +16,19 @@ use std::{
 use serde::Serialize;
 use speechkit::{
     SpeechError,
-    asr::{AsrEngine, SegmentPostProcessor},
+    asr::{AsrEngine, SegmentPostProcessor, SessionOptions},
     cloud::{
         CloudRuntime, DashScopeAsr, DashScopeAsrConfig, OpenAiHttp, OpenAiHttpConfig,
         OpenAiRealtime, OpenAiRealtimeConfig,
     },
-    sherpa::{AsrFamily, Inference, SherpaAsr, SherpaAsrConfig, SherpaPunctuation},
+    sherpa::{AsrFamily, Hotword, Inference, SherpaAsr, SherpaAsrConfig, SherpaPunctuation},
 };
 
 use crate::{
+    dictionary::{self, Use},
     keychain::{self, Provider},
     reload::EngineManager,
-    settings::{LocalModel, OpenAiMode, Settings},
+    settings::{DictionaryEntry, LocalModel, OpenAiMode, Settings},
 };
 
 /// The id of the OpenAI engine in [`Settings::active_engine`].
@@ -316,6 +317,8 @@ pub struct EngineInfo {
     /// `native`, `model` (a punctuation model runs after), or `none`.
     pub punctuation: &'static str,
     pub language_override: bool,
+    /// How it uses the dictionary: `hotwords`, `prompt`, or `replacements`.
+    pub dictionary: &'static str,
 }
 
 /// An engine ready for dictation.
@@ -325,9 +328,32 @@ pub struct LoadedEngine {
     /// text stays available for "Use raw".
     pub punct: Option<Arc<SherpaPunctuation>>,
     pub info: EngineInfo,
+    /// App-only dictionary words the model accepted as hotwords, spelled
+    /// for it, for sessions in those apps to add as hints.
+    pub session_words: Vec<String>,
+    /// Whether the model spells Latin hotwords in upper case.
+    pub upper_case: bool,
 }
 
 impl LoadedEngine {
+    /// Session options for a dictation in `app`: the chosen language, when
+    /// the engine takes one, and the app's own dictionary words.
+    pub fn session_options(&self, settings: &Settings, app: &str) -> SessionOptions {
+        let mut options = SessionOptions::default();
+        if let Some(code) = settings.language.code()
+            && self.info.language_override
+        {
+            options = options.with_language(code);
+        }
+        if !self.session_words.is_empty() && self.engine.capabilities().session_hints {
+            let hints = dictionary::session_hints(&settings.dictionary, app, &self.session_words, self.upper_case);
+            if !hints.is_empty() {
+                options = options.with_hints(hints);
+            }
+        }
+        options
+    }
+
     /// The text to insert: each segment punctuated if a model is loaded.
     pub fn finish_text(&self, segments: &[String]) -> String {
         let parts: Vec<String> = segments
@@ -409,7 +435,8 @@ fn build_local(
             })?;
         SherpaAsrConfig::offline(dir, vad).with_family(family)
     };
-    let built = AsrEngine::new(SherpaAsr::load(&config.with_inference(inference))?);
+    let words = with_dictionary(config, family, dir, &settings.dictionary);
+    let built = AsrEngine::new(SherpaAsr::load(&words.config.with_inference(inference))?);
     let caps = built.capabilities().clone();
     // Punctuation is optional: an unloadable model (moved, deleted, broken)
     // leaves the engine usable with its raw text.
@@ -442,10 +469,91 @@ fn build_local(
                 "none"
             },
             language_override: caps.language_override,
+            dictionary: words.use_.as_str(),
         },
         engine: built,
         punct,
+        session_words: words.session_words,
+        upper_case: words.upper_case,
     })
+}
+
+/// A model's configuration with the dictionary in it, and what came of it.
+struct WithDictionary {
+    config: SherpaAsrConfig,
+    use_: Use,
+    session_words: Vec<String>,
+    upper_case: bool,
+}
+
+/// Puts the dictionary into `config` as far as the family takes it:
+/// hotwords for transducers, a prompt for Qwen3-ASR and FunASR-Nano. Words
+/// the model cannot take, such as characters it does not know, are left
+/// out rather than failing the load; replacements still apply them.
+fn with_dictionary(
+    config: SherpaAsrConfig,
+    family: AsrFamily,
+    dir: &Path,
+    entries: &[DictionaryEntry],
+) -> WithDictionary {
+    let plain = |config: SherpaAsrConfig, use_| WithDictionary {
+        config,
+        use_,
+        session_words: Vec::new(),
+        upper_case: false,
+    };
+    let fits = |hotwords: &[Hotword]| config.clone().with_hotwords(hotwords.to_vec()).validate().is_ok();
+    match family {
+        AsrFamily::StreamingTransducer | AsrFamily::OfflineTransducer => {
+            let tokens = dictionary::Tokens::read(dir);
+            if !tokens.take_hotwords(dir.join("bpe.vocab").is_file()) {
+                tracing::info!("the model has no bpe.vocab for hotwords; the dictionary applies as replacements");
+                return plain(config, Use::Replacements);
+            }
+            // Hotwords need what the model's tokens need.
+            if let Err(error) = config.clone().with_hotwords(Vec::<Hotword>::new()).validate() {
+                tracing::info!(error = %describe(&error), "the model takes no hotwords; the dictionary applies as replacements");
+                return plain(config, Use::Replacements);
+            }
+            let upper_case = tokens.upper_case;
+            let words = dictionary::transducer_words(entries, upper_case);
+            // Check them all at once, and one by one only if that fails.
+            let accept = |hotwords: Vec<Hotword>| -> Vec<Hotword> {
+                if fits(&hotwords) {
+                    return hotwords;
+                }
+                hotwords.into_iter().filter(|h| fits(std::slice::from_ref(h))).collect()
+            };
+            let every_app = accept(words.every_app);
+            let session_words: Vec<String> = accept(words.app_only.into_iter().map(Hotword::new).collect())
+                .into_iter()
+                .map(|h| h.text)
+                .collect();
+            let skipped = entries.len().saturating_sub(every_app.len() + session_words.len());
+            if skipped > 0 {
+                tracing::info!(skipped, "dictionary words the model cannot take as hotwords");
+            }
+            // Without words, keep greedy decoding: hotwords make decoding
+            // 2 to 4 times slower.
+            if every_app.is_empty() && session_words.is_empty() {
+                return plain(config, Use::Hotwords);
+            }
+            WithDictionary {
+                config: config.with_hotwords(every_app),
+                use_: Use::Hotwords,
+                session_words,
+                upper_case,
+            }
+        }
+        AsrFamily::Qwen3Asr | AsrFamily::FunAsrNano => {
+            let prompt = dictionary::model_prompt(entries, family == AsrFamily::FunAsrNano);
+            if prompt.is_empty() || !fits(&prompt) {
+                return plain(config, Use::Prompt);
+            }
+            plain(config.with_hotwords(prompt), Use::Prompt)
+        }
+        _ => plain(config, Use::Replacements),
+    }
 }
 
 fn require_model(model: &str, provider: &str) -> Result<String, SpeechError> {
@@ -463,7 +571,7 @@ fn require_key(provider: Provider, name: &str) -> Result<Arc<speechkit::Secret>,
         .ok_or_else(|| SpeechError::InvalidInput(format!("add your {name} API key first")))
 }
 
-fn cloud_info(id: &str, name: String, kind: &str, built: &AsrEngine) -> EngineInfo {
+fn cloud_info(id: &str, name: String, kind: &str, built: &AsrEngine, dictionary: Use) -> EngineInfo {
     let caps = built.capabilities();
     EngineInfo {
         id: id.into(),
@@ -477,6 +585,7 @@ fn cloud_info(id: &str, name: String, kind: &str, built: &AsrEngine) -> EngineIn
             "none"
         },
         language_override: caps.language_override,
+        dictionary: dictionary.as_str(),
     }
 }
 
@@ -484,26 +593,29 @@ fn build_openai(settings: &Settings, runtime: &CloudRuntime) -> Result<LoadedEng
     let openai = &settings.openai;
     let model = require_model(&openai.model, "OpenAI")?;
     let key = require_key(Provider::OpenAi, "OpenAI")?;
-    let (built, kind) = match openai.mode {
-        OpenAiMode::File => (
-            AsrEngine::new(OpenAiHttp::new(
-                OpenAiHttpConfig::new(openai.base_url.trim(), model.as_str()).with_api_key(key),
-                runtime.clone(),
-            )?),
-            "OpenAI",
-        ),
+    let (built, kind, dictionary) = match openai.mode {
+        OpenAiMode::File => {
+            let mut config = OpenAiHttpConfig::new(openai.base_url.trim(), model.as_str()).with_api_key(key);
+            if let Some(prompt) = dictionary::openai_prompt(&settings.dictionary) {
+                config = config.with_prompt(prompt);
+            }
+            (AsrEngine::new(OpenAiHttp::new(config, runtime.clone())?), "OpenAI", Use::Prompt)
+        }
         OpenAiMode::Realtime => (
             AsrEngine::new(OpenAiRealtime::new(
                 OpenAiRealtimeConfig::new(model.as_str(), key),
                 runtime.clone(),
             )?),
             "OpenAI Realtime",
+            Use::Replacements,
         ),
     };
     Ok(LoadedEngine {
-        info: cloud_info(OPENAI, model, kind, &built),
+        info: cloud_info(OPENAI, model, kind, &built, dictionary),
         engine: built,
         punct: None,
+        session_words: Vec::new(),
+        upper_case: false,
     })
 }
 
@@ -519,9 +631,11 @@ fn build_dashscope(
         runtime.clone(),
     )?);
     Ok(LoadedEngine {
-        info: cloud_info(DASHSCOPE, model, "DashScope", &built),
+        info: cloud_info(DASHSCOPE, model, "DashScope", &built, Use::Replacements),
         engine: built,
         punct: None,
+        session_words: Vec::new(),
+        upper_case: false,
     })
 }
 
@@ -887,6 +1001,25 @@ mod tests {
         let status = engines.status();
         assert_eq!(status.failed.as_deref(), Some(OPENAI));
         assert_eq!(status.active.unwrap().id, offline);
+    }
+
+    #[test]
+    #[ignore = "needs sherpa-onnx models"]
+    fn a_model_without_hotword_support_still_loads_with_a_dictionary() {
+        let mut settings = Settings::default();
+        let id = add(&mut settings, ZIPFORMER);
+        settings.dictionary.push(DictionaryEntry {
+            id: "1".into(),
+            word: "yellow".into(),
+            ..DictionaryEntry::default()
+        });
+        let runtime = CloudRuntime::owned(1).unwrap();
+        let loaded = build(&id, &settings, &runtime).unwrap();
+        // This archive has no bpe.vocab, which BPE hotwords need.
+        assert_eq!(loaded.info.dictionary, "replacements");
+        assert!(loaded.session_words.is_empty());
+        let (raw, _) = transcribe(&loaded, &models().join(ZIPFORMER).join("test_wavs/0.wav"));
+        assert!(raw.to_lowercase().contains("yellow"), "{raw}");
     }
 
     #[test]

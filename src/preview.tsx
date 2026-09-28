@@ -12,7 +12,7 @@ import "./styles.css";
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { createRoot } from "react-dom/client";
-import type { HistoryItem, PillView, Snapshot } from "./lib/ipc";
+import type { DictionaryEntry, HistoryItem, PillView, PolishSettings, Snapshot } from "./lib/ipc";
 
 const params = new URLSearchParams(location.search);
 const label = params.get("w") ?? "main";
@@ -37,9 +37,36 @@ const snapshot: Snapshot = {
     keepRecordingsDays: 7,
     openai: { baseUrl: "https://api.openai.com/v1", model: "", mode: "file" },
     dashscope: { model: "", region: "china" },
+    dictionary: [
+      { id: "w1", word: "speechkit", soundsLike: [], kind: "term", boost: "strong", apps: [] },
+      { id: "w2", word: "Mei Lin", soundsLike: ["may lin"], kind: "person", boost: "normal", apps: [] },
+      { id: "w3", word: "sherpa-onnx", soundsLike: ["sherpa onyx"], kind: "term", boost: "strong", apps: ["VS Code", "Slack"] },
+      { id: "w4", word: "cargo clippy", soundsLike: ["cargo clippie"], kind: "term", boost: "normal", apps: ["Terminal"] },
+      { id: "w5", word: "通义千问", soundsLike: ["tong yi qian wen"], kind: "term", boost: "strong", apps: [] },
+    ],
+    polish: {
+      enabled: true,
+      removeFillers: true,
+      selfCorrections: true,
+      formatLists: true,
+      appTone: true,
+      translate: false,
+      translateTo: "English",
+      provider: "local",
+      baseUrl: "http://localhost:11434/v1",
+      model: "qwen3:8b",
+      tones: [
+        { app: "Mail", tone: "formal" },
+        { app: "Slack", tone: "casual" },
+        { app: "Notes", tone: "asSpoken" },
+        { app: "VS Code", tone: "literal" },
+        { app: "Terminal", tone: "literal" },
+      ],
+      defaultTone: "asSpoken",
+    },
   },
   engine: {
-    active: { id: "local:2", name: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17", kind: "SenseVoice", onDevice: true, live: false, punctuation: "native", languageOverride: true },
+    active: { id: "local:2", name: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17", kind: "SenseVoice", onDevice: true, live: false, punctuation: "native", languageOverride: true, dictionary: "replacements" },
     loading: null,
     failed: null,
     error: null,
@@ -61,9 +88,39 @@ const history: HistoryItem[] = [
   { id: "b", createdAt: now - 3_600_000, app: "Slack", durationMs: 9_000, text: "", raw: "", punctuated: null, engine: { name: "gpt-4o-transcribe", kind: "OpenAI", onDevice: false }, status: "failed", error: "backend `openai-http` failed: connection reset", recording: null, recordingPath: null, words: 0 },
 ];
 
+/** Commands that change settings update the mock and tell the windows. */
+function changed() {
+  setTimeout(() => emit("state-changed"), 0);
+}
+
 mockIPC(
-  (cmd) => {
-    if (cmd === "get_state") return snapshot;
+  async (cmd, args) => {
+    const a = args as Record<string, unknown>;
+    if (cmd === "get_state") return structuredClone(snapshot);
+    if (cmd === "dictionary_save") {
+      const entry = a.entry as DictionaryEntry;
+      const words = snapshot.settings.dictionary;
+      if (!entry.id) entry.id = String(Date.now());
+      const at = words.findIndex((w) => w.id === entry.id);
+      if (at >= 0) words[at] = entry;
+      else words.push(entry);
+      changed();
+      return entry.id;
+    }
+    if (cmd === "dictionary_remove") {
+      snapshot.settings.dictionary = snapshot.settings.dictionary.filter((w) => w.id !== a.id);
+      changed();
+      return null;
+    }
+    if (cmd === "set_polish") {
+      snapshot.settings.polish = a.polish as PolishSettings;
+      changed();
+      return null;
+    }
+    if (cmd === "polish_preview") {
+      await new Promise((r) => setTimeout(r, 700));
+      return "Can you rerun the nightly with three test threads? Models aborted again.";
+    }
     if (cmd === "history_list") return history;
     if (cmd === "list_microphones") return [{ name: "MacBook Pro Microphone", isDefault: true }, { name: "AirPods Pro", isDefault: false }, { name: "BlackHole 2ch", isDefault: false }];
     return null;

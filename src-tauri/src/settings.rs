@@ -108,6 +108,143 @@ pub struct DashScopeSettings {
     pub region: DashScopeRegion,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum WordKind {
+    #[default]
+    Term,
+    Person,
+}
+
+/// How strongly a hotword engine favors a word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum Boost {
+    #[default]
+    Normal,
+    Strong,
+}
+
+/// A word the engine should get right: a name, a term, or a fix for a
+/// mishearing. See [`crate::dictionary`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DictionaryEntry {
+    pub id: String,
+    /// How to write it.
+    pub word: String,
+    /// What the engine writes instead, replaced after recognition.
+    pub sounds_like: Vec<String>,
+    pub kind: WordKind,
+    pub boost: Boost,
+    /// App names it applies in; empty for every app.
+    pub apps: Vec<String>,
+}
+
+impl Default for DictionaryEntry {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            word: String::new(),
+            sounds_like: Vec::new(),
+            kind: WordKind::Term,
+            boost: Boost::Normal,
+            apps: Vec::new(),
+        }
+    }
+}
+
+impl DictionaryEntry {
+    /// Whether it applies in the app named `app`.
+    pub fn applies_in(&self, app: &str) -> bool {
+        self.apps.is_empty() || self.apps.iter().any(|a| a.eq_ignore_ascii_case(app))
+    }
+}
+
+/// How polished text should read in an app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum Tone {
+    Formal,
+    Casual,
+    #[default]
+    AsSpoken,
+    /// No polish at all, as for code editors and terminals.
+    Literal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppTone {
+    pub app: String,
+    pub tone: Tone,
+}
+
+/// Where the polish model runs: an OpenAI-compatible chat server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PolishProvider {
+    /// A server on this Mac, such as Ollama or LM Studio.
+    #[default]
+    Local,
+    /// OpenAI, with the key and base URL of the OpenAI engine.
+    OpenAi,
+    /// DashScope's compatible mode, with its key and region.
+    DashScope,
+}
+
+/// Polish & tone: a language model rewrites the transcript before it is
+/// inserted. See [`crate::polish`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PolishSettings {
+    pub enabled: bool,
+    pub remove_fillers: bool,
+    pub self_corrections: bool,
+    pub format_lists: bool,
+    pub app_tone: bool,
+    pub translate: bool,
+    /// The language to translate into, by its English name.
+    pub translate_to: String,
+    pub provider: PolishProvider,
+    /// The local server's OpenAI-compatible URL.
+    pub base_url: String,
+    /// Empty until the user names one: Viary never picks a model.
+    pub model: String,
+    pub tones: Vec<AppTone>,
+    /// The tone in apps without their own.
+    pub default_tone: Tone,
+}
+
+impl Default for PolishSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            remove_fillers: true,
+            self_corrections: true,
+            format_lists: true,
+            app_tone: true,
+            translate: false,
+            translate_to: "English".into(),
+            provider: PolishProvider::Local,
+            base_url: "http://localhost:11434/v1".into(),
+            model: String::new(),
+            tones: Vec::new(),
+            default_tone: Tone::AsSpoken,
+        }
+    }
+}
+
+impl PolishSettings {
+    /// The tone set for the app named `app`.
+    pub fn tone_in(&self, app: &str) -> Tone {
+        self.tones
+            .iter()
+            .find(|t| t.app.eq_ignore_ascii_case(app))
+            .map_or(self.default_tone, |t| t.tone)
+    }
+}
+
 /// Everything Viary remembers between launches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -130,6 +267,8 @@ pub struct Settings {
     pub keep_recordings_days: u32,
     pub openai: OpenAiSettings,
     pub dashscope: DashScopeSettings,
+    pub dictionary: Vec<DictionaryEntry>,
+    pub polish: PolishSettings,
 }
 
 impl Default for Settings {
@@ -147,6 +286,8 @@ impl Default for Settings {
             keep_recordings_days: 7,
             openai: OpenAiSettings::default(),
             dashscope: DashScopeSettings::default(),
+            dictionary: Vec::new(),
+            polish: PolishSettings::default(),
         }
     }
 }

@@ -1,9 +1,10 @@
 // The menu bar popover (MenuBar artboard): status, the active engine,
-// language, microphone, recent dictations.
+// language, polish and translation, microphone, recent dictations.
 
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useEffect, useRef } from "react";
+import { Switch } from "../components/Controls";
 import { AppTile, Icon, Kbd } from "../components/Icons";
 import { api, engineName, useHistory, useSnapshot, type Language, type Snapshot } from "../lib/ipc";
 
@@ -107,6 +108,7 @@ export function Popover() {
   const state = status(s);
   const canPickLanguage = s.engine.active?.languageOverride ?? false;
   const recent = (history ?? []).filter((h) => h.text).slice(0, 2);
+  const polish = s.settings.polish;
 
   return (
     <div className="p-3">
@@ -182,6 +184,29 @@ export function Popover() {
           </div>
         </div>
         <div className="border-t border-[#E8E3D8]">
+          <div className="flex min-h-11 items-center gap-2.5 px-3.5 text-sm">
+            <Icon name="sparkle" />
+            <button type="button" className="grow text-left" onClick={() => api.openMain("polish")}>
+              Polish transcripts
+            </button>
+            <Switch
+              small
+              label="Polish transcripts"
+              on={polish.enabled}
+              onChange={(enabled) => api.setPolish({ ...polish, enabled })}
+            />
+          </div>
+          <div className="flex min-h-11 items-center gap-2.5 px-3.5 text-sm">
+            <Icon name="translate" />
+            <span className="grow">Translate to {polish.translateTo}</span>
+            <Switch
+              small
+              label={`Translate to ${polish.translateTo}`}
+              on={polish.enabled && polish.translate}
+              disabled={!polish.enabled}
+              onChange={(translate) => api.setPolish({ ...polish, translate })}
+            />
+          </div>
           <button
             type="button"
             onClick={() => api.openMain("engine")}
