@@ -67,6 +67,9 @@ pub enum PillView {
     Transcribing {
         label: String,
     },
+    /// The polish model is rewriting the text; Skip inserts it as
+    /// recognized.
+    Polishing,
     #[serde(rename_all = "camelCase")]
     Inserted {
         label: String,
@@ -92,13 +95,13 @@ pub enum PillView {
 impl PillView {
     /// Whether the pill has buttons, and so must take clicks.
     pub fn interactive(&self) -> bool {
-        matches!(self, Self::Inserted { .. } | Self::Failed { .. })
+        matches!(self, Self::Polishing | Self::Inserted { .. } | Self::Failed { .. })
     }
 
     fn tray(&self) -> TrayState {
         match self {
             Self::Listening { .. } => TrayState::Listening,
-            Self::Transcribing { .. } => TrayState::Working,
+            Self::Transcribing { .. } | Self::Polishing => TrayState::Working,
             Self::Failed { .. } => TrayState::Failed,
             _ => TrayState::Idle,
         }
@@ -114,6 +117,8 @@ pub enum PillAction {
     Retry,
     SwitchEngine,
     Dismiss,
+    /// Stop waiting for the polish model and insert the text as recognized.
+    SkipPolish,
 }
 
 pub enum Msg {
@@ -138,13 +143,16 @@ pub struct Transcribed {
     engine: Option<Arc<LoadedEngine>>,
 }
 
-/// Text back from the polish step, ready to insert.
-pub struct Polished {
+/// The polish model's rewrite, or why there is none.
+pub type Polished = Result<String, String>;
+
+/// A dictation waiting for the polish model, with the text as recognized
+/// to insert if it fails or the user skips it.
+struct Polishing {
+    job: Job,
     text: String,
     raw: String,
     info: Option<EngineInfo>,
-    /// Why the text is not polished, when the model failed.
-    note: Option<&'static str>,
 }
 
 /// One dictation, from key release until its text lands or it fails.
@@ -182,6 +190,8 @@ enum Phase {
     Idle,
     Listening(Box<Listening>),
     Busy(Job),
+    /// Waiting for the polish model.
+    Polishing(Box<Polishing>),
     Inserted(Inserted),
     /// Failed with the audio kept. `alternative` is another engine's id.
     Failed {
@@ -241,12 +251,7 @@ impl Controller {
                     self.stream_partials(token, started)
                 }
                 Msg::Finished(token, done) if token == self.token => self.finished(done),
-                Msg::Polished(token, polished) if token == self.token => {
-                    if let Phase::Busy(job) = std::mem::replace(&mut self.phase, Phase::Idle) {
-                        let Polished { text, raw, info, note } = polished;
-                        self.insert(job, text, raw, info.as_ref(), note);
-                    }
-                }
+                Msg::Polished(token, polished) if token == self.token => self.polished(polished),
                 Msg::Switched(token, id, outcome) if token == self.token => {
                     self.switched(id, outcome)
                 }
@@ -291,7 +296,10 @@ impl Controller {
     // Recording
 
     fn key_down(&mut self) {
-        if matches!(self.phase, Phase::Listening(_) | Phase::Busy(_)) {
+        if matches!(
+            self.phase,
+            Phase::Listening(_) | Phase::Busy(_) | Phase::Polishing(_)
+        ) {
             return;
         }
         let token = self.next_token();
@@ -489,8 +497,8 @@ impl Controller {
     }
 
     /// Sends `text` through the polish model, then inserts it. The pill
-    /// says so meanwhile; a model that fails or is not set up leaves the
-    /// text as recognized.
+    /// says so meanwhile, with Skip; a model that fails or is not set up
+    /// leaves the text as recognized.
     fn polish(&mut self, job: Job, settings: &Settings, text: String, raw: String, info: Option<EngineInfo>) {
         let request = match polish::request(settings, &job.target.name) {
             Ok(request) => request,
@@ -501,21 +509,27 @@ impl Controller {
             }
         };
         let token = self.token;
-        self.show(PillView::Transcribing {
-            label: "Polishing".into(),
-        });
-        self.phase = Phase::Busy(job);
-        let mailbox = self.mailbox.clone();
+        self.show(PillView::Polishing);
+        let (mailbox, spoken) = (self.mailbox.clone(), text.clone());
+        self.phase = Phase::Polishing(Box::new(Polishing { job, text, raw, info }));
         std::thread::spawn(move || {
-            let (text, note) = match request.run(&text, polish::TIMEOUT) {
-                Ok(polished) => (polished, None),
-                Err(error) => {
-                    tracing::warn!(%error, "polish failed; inserting the text as recognized");
-                    (text, Some("not polished"))
-                }
-            };
-            let _ = mailbox.send(Msg::Polished(token, Polished { text, raw, info, note }));
+            let polished = request.run(&spoken, polish::TIMEOUT);
+            let _ = mailbox.send(Msg::Polished(token, polished));
         });
+    }
+
+    fn polished(&mut self, polished: Polished) {
+        let Phase::Polishing(waiting) = std::mem::replace(&mut self.phase, Phase::Idle) else {
+            return;
+        };
+        let Polishing { job, text, raw, info } = *waiting;
+        match polished {
+            Ok(polished) => self.insert(job, polished, raw, info.as_ref(), None),
+            Err(error) => {
+                tracing::warn!(%error, "polish failed; inserting the text as recognized");
+                self.insert(job, text, raw, info.as_ref(), Some("not polished"));
+            }
+        }
     }
 
     fn insert(&mut self, job: Job, text: String, raw: String, info: Option<&EngineInfo>, note: Option<&str>) {
@@ -701,6 +715,11 @@ impl Controller {
                 self.state().activate_engine(&self.app, id, move |outcome| {
                     let _ = mailbox.send(Msg::Switched(token, target, outcome));
                 });
+            }
+            (PillAction::SkipPolish, Phase::Polishing(waiting)) => {
+                // Inserting moves to a new token: a late reply is dropped.
+                let Polishing { job, text, raw, info } = *waiting;
+                self.insert(job, text, raw, info.as_ref(), Some("not polished"));
             }
             (PillAction::Dismiss, Phase::Failed { .. }) => {
                 self.next_token();

@@ -243,6 +243,53 @@ impl PolishSettings {
             .find(|t| t.app.eq_ignore_ascii_case(app))
             .map_or(self.default_tone, |t| t.tone)
     }
+
+    /// These settings with the fields in `patch` changed, as the web views
+    /// send them: one change never carries stale copies of the others.
+    /// Tones change one app at a time, with [`Self::set_tone`].
+    ///
+    /// # Errors
+    ///
+    /// When `patch` names an unknown field or holds a wrong value.
+    pub fn patched(&self, patch: serde_json::Map<String, serde_json::Value>) -> Result<Self, String> {
+        let serde_json::Value::Object(mut fields) =
+            serde_json::to_value(self).map_err(|e| e.to_string())?
+        else {
+            return Err("polish settings are not an object".into());
+        };
+        for (key, value) in patch {
+            if key == "tones" || !fields.contains_key(&key) {
+                return Err(format!("unknown polish setting `{key}`"));
+            }
+            fields.insert(key, value);
+        }
+        let mut polish: Self =
+            serde_json::from_value(serde_json::Value::Object(fields)).map_err(|e| e.to_string())?;
+        polish.model = polish.model.trim().to_owned();
+        polish.base_url = polish.base_url.trim().to_owned();
+        Ok(polish)
+    }
+
+    /// Sets the tone of the app named `app`, adding it to the list, or
+    /// takes it off the list with `None`.
+    pub fn set_tone(&mut self, app: &str, tone: Option<Tone>) {
+        let app = app.trim();
+        if app.is_empty() {
+            return;
+        }
+        let at = self.tones.iter().position(|t| t.app.eq_ignore_ascii_case(app));
+        match (at, tone) {
+            (Some(at), Some(tone)) => self.tones[at].tone = tone,
+            (Some(at), None) => {
+                self.tones.remove(at);
+            }
+            (None, Some(tone)) => self.tones.push(AppTone {
+                app: app.to_owned(),
+                tone,
+            }),
+            (None, None) => {}
+        }
+    }
 }
 
 /// Everything Viary remembers between launches.
@@ -358,6 +405,36 @@ mod tests {
             settings.openai.model.is_empty(),
             "no model is picked for the user"
         );
+    }
+
+    #[test]
+    fn polish_patches_change_only_their_fields() {
+        let saved = PolishSettings {
+            enabled: true,
+            remove_fillers: false,
+            ..PolishSettings::default()
+        };
+        let patch = serde_json::json!({ "formatLists": false, "model": " qwen3:8b " });
+        let polish = saved.patched(patch.as_object().unwrap().clone()).unwrap();
+        assert!(polish.enabled && !polish.remove_fillers && !polish.format_lists);
+        assert_eq!(polish.model, "qwen3:8b");
+        let unknown = serde_json::json!({ "tones": [] });
+        assert!(saved.patched(unknown.as_object().unwrap().clone()).is_err());
+        let wrong = serde_json::json!({ "enabled": "yes" });
+        assert!(saved.patched(wrong.as_object().unwrap().clone()).is_err());
+    }
+
+    #[test]
+    fn app_tones_change_one_app_at_a_time() {
+        let mut polish = PolishSettings::default();
+        polish.set_tone(" Mail ", Some(Tone::Formal));
+        polish.set_tone("Slack", Some(Tone::Casual));
+        polish.set_tone("mail", Some(Tone::Casual));
+        assert_eq!(polish.tone_in("Mail"), Tone::Casual);
+        assert_eq!(polish.tones.len(), 2);
+        polish.set_tone("MAIL", None);
+        assert_eq!(polish.tones.len(), 1);
+        assert_eq!(polish.tone_in("Mail"), Tone::AsSpoken);
     }
 
     #[test]

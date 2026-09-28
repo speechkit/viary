@@ -12,7 +12,7 @@ import "./styles.css";
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { createRoot } from "react-dom/client";
-import type { DictionaryEntry, HistoryItem, PillView, PolishSettings, Snapshot } from "./lib/ipc";
+import type { DictionaryEntry, HistoryItem, PillView, PolishSettings, Snapshot, Tone } from "./lib/ipc";
 
 const params = new URLSearchParams(location.search);
 const label = params.get("w") ?? "main";
@@ -112,8 +112,18 @@ mockIPC(
       changed();
       return null;
     }
-    if (cmd === "set_polish") {
-      snapshot.settings.polish = a.polish as PolishSettings;
+    if (cmd === "update_polish") {
+      Object.assign(snapshot.settings.polish, a.patch as Partial<PolishSettings>);
+      changed();
+      return null;
+    }
+    if (cmd === "set_app_tone") {
+      const { target, tone } = a as { target: string; tone: Tone | null };
+      const tones = snapshot.settings.polish.tones;
+      const at = tones.findIndex((t) => t.app.toLowerCase() === target.toLowerCase());
+      if (at >= 0 && tone) tones[at] = { ...tones[at], tone };
+      else if (at >= 0) tones.splice(at, 1);
+      else if (tone) tones.push({ app: target, tone });
       changed();
       return null;
     }
@@ -132,6 +142,7 @@ const pills: Record<string, PillView> = {
   idle: { kind: "idle" },
   listening: { kind: "listening", token: 1, startedAt: now - 4000, context: "Mail", live: true },
   transcribing: { kind: "transcribing", label: "Transcribing" },
+  polishing: { kind: "polishing" },
   inserted: { kind: "inserted", label: "38 words", canRaw: true },
   copied: { kind: "copied", label: "No text field focused · copied to clipboard", hint: "⌘V to paste" },
   failed: { kind: "failed", message: "Connection lost · audio kept", detail: "", retryable: true, alternative: "Use on-device" },

@@ -517,15 +517,8 @@ fn with_dictionary(
             }
             let upper_case = tokens.upper_case;
             let words = dictionary::transducer_words(entries, upper_case);
-            // Check them all at once, and one by one only if that fails.
-            let accept = |hotwords: Vec<Hotword>| -> Vec<Hotword> {
-                if fits(&hotwords) {
-                    return hotwords;
-                }
-                hotwords.into_iter().filter(|h| fits(std::slice::from_ref(h))).collect()
-            };
-            let every_app = accept(words.every_app);
-            let session_words: Vec<String> = accept(words.app_only.into_iter().map(Hotword::new).collect())
+            let every_app = accepted(words.every_app, &fits);
+            let session_words: Vec<String> = accepted(words.app_only.into_iter().map(Hotword::new).collect(), &fits)
                 .into_iter()
                 .map(|h| h.text)
                 .collect();
@@ -554,6 +547,22 @@ fn with_dictionary(
         }
         _ => plain(config, Use::Replacements),
     }
+}
+
+/// The `hotwords` that `fits` accepts: all at once when it takes them, else
+/// by halves, so a few bad words cost a few checks, not one per word.
+fn accepted(hotwords: Vec<Hotword>, fits: &impl Fn(&[Hotword]) -> bool) -> Vec<Hotword> {
+    if hotwords.is_empty() || fits(&hotwords) {
+        return hotwords;
+    }
+    if hotwords.len() == 1 {
+        return Vec::new();
+    }
+    let mut first = hotwords;
+    let second = first.split_off(first.len() / 2);
+    let mut kept = accepted(first, fits);
+    kept.extend(accepted(second, fits));
+    kept
 }
 
 fn require_model(model: &str, provider: &str) -> Result<String, SpeechError> {
@@ -792,6 +801,20 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hotwords_are_checked_by_halves() {
+        let checks = std::cell::Cell::new(0);
+        let fits = |hotwords: &[Hotword]| {
+            checks.set(checks.get() + 1);
+            hotwords.iter().all(|h| !h.text.contains('7'))
+        };
+        let words: Vec<Hotword> = (0..64).map(|i| Hotword::new(format!("w{i}"))).collect();
+        let kept = accepted(words, &fits);
+        assert_eq!(kept.len(), 58, "w7, w17, w27, w37, w47 and w57 are out");
+        assert!(kept.iter().all(|h| !h.text.contains('7')));
+        assert!(checks.get() < 64, "{} checks", checks.get());
+    }
 
     fn dir_with(name: &str, files: &[(&str, &str)]) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("viary-model-{}-{name}", std::process::id()));

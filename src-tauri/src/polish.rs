@@ -205,9 +205,16 @@ impl Request {
     }
 }
 
+/// About how many Latin letters `text` takes to say: a CJK character
+/// carries a word or so, and its English translation some 4 letters.
+fn length(text: &str) -> usize {
+    text.chars().map(|c| if dictionary::is_cjk(c) { 4 } else { 1 }).sum()
+}
+
 /// The model's rewrite, without a reasoning block, if it looks like one: not
 /// empty, and not far longer than what was said, which would mean it
-/// answered instead of rewriting.
+/// answered instead of rewriting. Length is weighed across scripts, so a
+/// translation from Chinese into English passes.
 fn check(said: &str, reply: &str) -> Result<String, String> {
     let reply = match reply.trim_start().strip_prefix("<think>") {
         Some(rest) => rest.split_once("</think>").map_or("", |(_, after)| after),
@@ -217,7 +224,7 @@ fn check(said: &str, reply: &str) -> Result<String, String> {
     if reply.is_empty() {
         return Err("the polish model sent no text".into());
     }
-    if reply.chars().count() > said.chars().count() * 3 + 200 {
+    if length(reply) > length(said) * 3 + 200 {
         return Err("the polish model replied with more than a rewrite".into());
     }
     Ok(reply.to_owned())
@@ -383,5 +390,8 @@ mod tests {
         assert_eq!(check("hi", "<think>hmm</think>\nHi.").unwrap(), "Hi.");
         assert!(check("hi", "  ").is_err());
         assert!(check("hi", &"x".repeat(500)).is_err());
+        // 400 characters of Chinese become some 1,300 letters of English.
+        let said = "我们".repeat(200);
+        assert!(check(&said, &"word ".repeat(300)).is_ok());
     }
 }

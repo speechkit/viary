@@ -9,6 +9,7 @@ import {
   api,
   errorText,
   knownApps,
+  toneIn,
   useHistory,
   type PolishProvider,
   type PolishSettings,
@@ -57,10 +58,6 @@ function AppTile({ app }: { app: string }) {
       {[...app][0]?.toUpperCase()}
     </span>
   );
-}
-
-function toneOf(polish: PolishSettings, app: string): Tone {
-  return polish.tones.find((t) => t.app === app)?.tone ?? polish.defaultTone;
 }
 
 function Rule({
@@ -144,7 +141,7 @@ function ModelCard({ s, onError }: { s: Snapshot; onError: (e: string) => void }
           type="button"
           className={btnPrimary}
           disabled={!dirty}
-          onClick={() => api.setPolish({ ...saved, ...draft, model: draft.model.trim() }).catch((e) => onError(errorText(e)))}
+          onClick={() => api.updatePolish({ ...draft, model: draft.model.trim() }).catch((e) => onError(errorText(e)))}
         >
           Save
         </button>
@@ -206,9 +203,7 @@ function TonesCard({ s, onError }: { s: Snapshot; onError: (e: string) => void }
   const polish = s.settings.polish;
   const listed = polish.tones.map((t) => t.app);
   const suggestions = knownApps(history).filter((app) => !listed.includes(app));
-  const save = (next: Partial<PolishSettings>) => api.setPolish({ ...polish, ...next }).catch((e) => onError(errorText(e)));
-  const setTone = (app: string, tone: Tone) =>
-    save({ tones: polish.tones.map((t) => (t.app === app ? { app, tone } : t)) });
+  const setTone = (app: string, tone: Tone | null) => api.setAppTone(app, tone).catch((e) => onError(errorText(e)));
   const dim = !polish.enabled ? "opacity-50" : "";
   return (
     <div className="overflow-hidden rounded-[14px] border border-line bg-white">
@@ -226,7 +221,7 @@ function TonesCard({ s, onError }: { s: Snapshot; onError: (e: string) => void }
           onCancel={() => setAdding(false)}
           onAdd={(app) => {
             setAdding(false);
-            if (!listed.includes(app)) save({ tones: [...polish.tones, { app, tone: polish.defaultTone }] });
+            if (!listed.some((a) => a.toLowerCase() === app.toLowerCase())) setTone(app, polish.defaultTone);
           }}
         />
       )}
@@ -240,7 +235,7 @@ function TonesCard({ s, onError }: { s: Snapshot; onError: (e: string) => void }
               type="button"
               aria-label={`Remove ${app}`}
               className="text-faint opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover:text-rust"
-              onClick={() => save({ tones: polish.tones.filter((t) => t.app !== app) })}
+              onClick={() => setTone(app, null)}
             >
               <Icon name="close" size={14} />
             </button>
@@ -251,7 +246,12 @@ function TonesCard({ s, onError }: { s: Snapshot; onError: (e: string) => void }
             <Icon name="plus" size={12} />
           </span>
           <span className="min-w-0 grow text-sm text-muted">Other apps</span>
-          <Select label="Tone in other apps" value={polish.defaultTone} options={TONES} onChange={(defaultTone) => save({ defaultTone })} />
+          <Select
+            label="Tone in other apps"
+            value={polish.defaultTone}
+            options={TONES}
+            onChange={(defaultTone) => api.updatePolish({ defaultTone }).catch((e) => onError(errorText(e)))}
+          />
           <span className="w-3.5" />
         </div>
       </div>
@@ -271,7 +271,7 @@ function PreviewCard({ s }: { s: Snapshot }) {
   const [text, setText] = useState(SAMPLE);
   const [result, setResult] = useState<{ text: string; error: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
-  const tone = TONES.find((t) => t.value === toneOf(polish, app))!;
+  const tone = TONES.find((t) => t.value === toneIn(polish, app))!;
   const ready = !!polish.model;
   const run = async () => {
     setBusy(true);
@@ -342,7 +342,7 @@ function PreviewCard({ s }: { s: Snapshot }) {
 export function PolishPage({ s }: { s: Snapshot }) {
   const [error, setError] = useState("");
   const polish = s.settings.polish;
-  const save = (next: Partial<PolishSettings>) => api.setPolish({ ...polish, ...next }).catch((e) => setError(errorText(e)));
+  const save = (next: Partial<Omit<PolishSettings, "tones">>) => api.updatePolish(next).catch((e) => setError(errorText(e)));
   const off = !polish.enabled;
   const needsModel = polish.enabled && !polish.model;
 
@@ -364,9 +364,11 @@ export function PolishPage({ s }: { s: Snapshot }) {
             <div className="flex min-w-0 grow flex-col gap-0.5">
               <span className="text-[15px] font-semibold">Polish transcripts</span>
               <span className={`text-[13px] leading-[1.45] ${needsModel ? "text-rust" : "text-muted"}`}>
-                {needsModel
-                  ? "Choose a polish model below. Until then, text is inserted as recognized."
-                  : "Off: punctuation only, exactly your words."}
+                {off
+                  ? "Off: punctuation only, exactly your words."
+                  : needsModel
+                    ? "Choose a polish model below. Until then, text is inserted as recognized."
+                    : "On: the model rewrites each dictation before it is inserted."}
               </span>
             </div>
             <Switch label="Polish transcripts" on={polish.enabled} onChange={(enabled) => save({ enabled })} />

@@ -20,8 +20,9 @@ const MAX_CHARS: usize = 64;
 const STRONG_BOOST: f32 = 3.5;
 /// Prompts for Qwen3-ASR and FunASR-Nano hold at most 64 characters.
 const MAX_MODEL_PROMPT: usize = 64;
-/// OpenAI reads only the last 224 tokens of a prompt.
-const MAX_OPENAI_PROMPT: usize = 600;
+/// OpenAI reads only the last 224 tokens of a prompt; the glossary stays
+/// under that, by a rough estimate, with room to spare.
+const MAX_OPENAI_TOKENS: usize = 180;
 
 /// How an engine uses the dictionary, as the Dictionary page explains it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,25 +238,36 @@ pub fn model_prompt(entries: &[DictionaryEntry], funasr: bool) -> Vec<Hotword> {
     words
 }
 
+/// A generous estimate of the tokens `text` takes: a CJK character may be
+/// two, and other text about one per three bytes.
+fn estimated_tokens(text: &str) -> usize {
+    let cjk = text.chars().filter(|c| is_cjk(*c)).count();
+    let other: usize = text.chars().filter(|c| !is_cjk(*c)).map(char::len_utf8).sum();
+    cjk * 2 + other.div_ceil(3)
+}
+
 /// OpenAI's prompt: a short glossary, which the model treats as preceding
-/// text and so spells its words as given.
+/// text and so spells its words as given. The words that fit are chosen
+/// Strong first, and listed Strong last: if OpenAI cuts the prompt, it
+/// cuts from the start.
 pub fn openai_prompt(entries: &[DictionaryEntry]) -> Option<String> {
-    let mut prompt = String::from("Glossary: ");
-    let mut any = false;
+    const INTRO: &str = "Glossary: ";
+    let mut total = estimated_tokens(INTRO) + 1;
+    let mut words: Vec<&str> = Vec::new();
     for word in prompt_words(entries) {
-        if prompt.len() + word.len() + 2 > MAX_OPENAI_PROMPT {
-            break;
+        // The word and its ", ".
+        let len = estimated_tokens(word) + 1;
+        if total + len > MAX_OPENAI_TOKENS {
+            continue;
         }
-        if any {
-            prompt.push_str(", ");
-        }
-        prompt.push_str(word);
-        any = true;
+        total += len;
+        words.push(word);
     }
-    any.then(|| {
-        prompt.push('.');
-        prompt
-    })
+    if words.is_empty() {
+        return None;
+    }
+    words.reverse();
+    Some(format!("{INTRO}{}.", words.join(", ")))
 }
 
 /// Words that apply in `app`, for the polish model to keep as spelled.
@@ -276,7 +288,7 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() && !is_cjk(c)
 }
 
-fn is_cjk(c: char) -> bool {
+pub(crate) fn is_cjk(c: char) -> bool {
     matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF)
 }
 
@@ -478,5 +490,16 @@ mod tests {
         ];
         assert_eq!(openai_prompt(&words).as_deref(), Some("Glossary: Mei Lin."));
         assert!(openai_prompt(&[]).is_none());
+    }
+
+    #[test]
+    fn openai_prompt_keeps_strong_words_and_lists_them_last() {
+        let mut words: Vec<_> = (0..200)
+            .map(|i| entry(&format!("通义千问{i:03}"), &[], &[]))
+            .collect();
+        words[150].boost = Boost::Strong;
+        let prompt = openai_prompt(&words).unwrap();
+        assert!(estimated_tokens(&prompt) <= MAX_OPENAI_TOKENS);
+        assert!(prompt.ends_with("通义千问150."), "{prompt}");
     }
 }

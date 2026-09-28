@@ -32,6 +32,8 @@ function status(s: Snapshot): Status {
       return { label: "Listening", tone: "live", hint: "Release to insert" };
     case "transcribing":
       return { label: "Transcribing", tone: "busy", hint: hold };
+    case "polishing":
+      return { label: "Polishing", tone: "busy", hint: "Skip from the pill to insert it as recognized" };
     case "failed":
       return { label: "Failed", tone: "attention", hint: "The audio is kept: retry from the pill" };
   }
@@ -193,7 +195,7 @@ export function Popover() {
               small
               label="Polish transcripts"
               on={polish.enabled}
-              onChange={(enabled) => api.setPolish({ ...polish, enabled })}
+              onChange={(enabled) => api.updatePolish({ enabled }).catch(console.error)}
             />
           </div>
           <div className="flex min-h-11 items-center gap-2.5 px-3.5 text-sm">
@@ -204,7 +206,7 @@ export function Popover() {
               label={`Translate to ${polish.translateTo}`}
               on={polish.enabled && polish.translate}
               disabled={!polish.enabled}
-              onChange={(translate) => api.setPolish({ ...polish, translate })}
+              onChange={(translate) => api.updatePolish({ translate }).catch(console.error)}
             />
           </div>
           <button

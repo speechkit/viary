@@ -187,6 +187,18 @@ export function Pill() {
         </Shell>
       );
       break;
+    case "polishing":
+      body = (
+        <Shell tight>
+          <Icon name="sparkle" />
+          <span>Polishing</span>
+          <Dots />
+          <Chip label="Skip polishing and insert the text as recognized" onClick={() => api.pill("skipPolish")}>
+            Skip
+          </Chip>
+        </Shell>
+      );
+      break;
     case "inserted":
       body = (
         <Shell tight>

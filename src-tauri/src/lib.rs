@@ -32,7 +32,7 @@ use crate::{
     macos::{hotkey::HotkeyListener, permissions},
     settings::{
         DashScopeSettings, DictionaryEntry, Hotkey, Language, LocalModel, OpenAiSettings,
-        PolishSettings, Settings, SettingsStore,
+        Settings, SettingsStore, Tone,
     },
 };
 
@@ -470,12 +470,27 @@ fn dictionary_remove(app: AppHandle, state: State<'_, App>, id: String) {
     ui::refresh(&app);
 }
 
+/// Changes the polish settings named in `patch`, keeping the rest as saved,
+/// so quick changes, from this window or the popover, never undo each other.
 #[tauri::command]
-fn set_polish(app: AppHandle, state: State<'_, App>, mut polish: PolishSettings) {
-    polish.model = polish.model.trim().to_owned();
-    polish.base_url = polish.base_url.trim().to_owned();
-    polish.tones.retain(|t| !t.app.trim().is_empty());
-    state.change(|s| s.polish = polish);
+fn update_polish(
+    app: AppHandle,
+    state: State<'_, App>,
+    patch: serde_json::Map<String, serde_json::Value>,
+) -> CmdResult<()> {
+    let mut outcome = Ok(());
+    state.change(|s| match s.polish.patched(patch) {
+        Ok(polish) => s.polish = polish,
+        Err(error) => outcome = Err(error),
+    });
+    ui::refresh(&app);
+    outcome
+}
+
+/// Sets the polish tone of `target`, or takes it off the list with `None`.
+#[tauri::command]
+fn set_app_tone(app: AppHandle, state: State<'_, App>, target: String, tone: Option<Tone>) {
+    state.change(|s| s.polish.set_tone(&target, tone));
     ui::refresh(&app);
 }
 
@@ -732,7 +747,8 @@ pub fn run() {
             set_preferences,
             dictionary_save,
             dictionary_remove,
-            set_polish,
+            update_polish,
+            set_app_tone,
             polish_preview,
             history_list,
             history_delete,

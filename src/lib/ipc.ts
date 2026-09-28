@@ -126,12 +126,13 @@ export type PillView =
   | { kind: "idle" }
   | { kind: "listening"; token: number; startedAt: number; context: string; live: boolean }
   | { kind: "transcribing"; label: string }
+  | { kind: "polishing" }
   | { kind: "inserted"; label: string; canRaw: boolean }
   | { kind: "copied"; label: string; hint: string }
   | { kind: "failed"; message: string; detail: string; retryable: boolean; alternative: string | null }
   | { kind: "hint"; text: string };
 
-export type PillAction = "undo" | "useRaw" | "retry" | "switchEngine" | "dismiss";
+export type PillAction = "undo" | "useRaw" | "retry" | "switchEngine" | "dismiss" | "skipPolish";
 
 export interface Snapshot {
   settings: Settings;
@@ -206,7 +207,10 @@ export const api = {
   setPreferences: (prefs: Preferences) => invoke<void>("set_preferences", { prefs }),
   saveWord: (entry: DictionaryEntry) => invoke<string>("dictionary_save", { entry }),
   removeWord: (id: string) => invoke<void>("dictionary_remove", { id }),
-  setPolish: (polish: PolishSettings) => invoke<void>("set_polish", { polish }),
+  /** Changes only the fields given, so quick changes never undo each other. */
+  updatePolish: (patch: Partial<Omit<PolishSettings, "tones">>) => invoke<void>("update_polish", { patch }),
+  /** Sets an app's polish tone, or takes the app off the list with `null`. */
+  setAppTone: (app: string, tone: Tone | null) => invoke<void>("set_app_tone", { target: app, tone }),
   polishPreview: (app: string, text: string) => invoke<string>("polish_preview", { target: app, text }),
   history,
   deleteHistory: (id: string) => invoke<void>("history_delete", { id }),
@@ -259,6 +263,13 @@ export function knownApps(history: HistoryItem[] | null): string[] {
   const counts = new Map<string, number>();
   for (const h of history ?? []) if (h.app) counts.set(h.app, (counts.get(h.app) ?? 0) + 1);
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([app]) => app);
+}
+
+/** The polish tone that applies in `app`, as the backend decides it. */
+export function toneIn(polish: PolishSettings, app: string): Tone {
+  const own = polish.tones.find((t) => t.app.toLowerCase() === app.toLowerCase())?.tone ?? polish.defaultTone;
+  if (own === "literal") return "literal";
+  return polish.appTone ? own : "asSpoken";
 }
 
 export function formatBytes(bytes: number): string {
