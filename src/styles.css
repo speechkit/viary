@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+/* Tokens from the Viary design: ink on paper, with the orange voice. */
+@theme {
+  --font-sans: "Geist Sans", system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+  --font-serif: "Newsreader", Georgia, serif;
+
+  --color-ink: #1c1b18;
+  --color-paper: #f4f1ea;
+  --color-card: #fbfaf7;
+  --color-sand: #ece8df;
+  --color-desk: #cec8ba;
+  --color-line: #e3ddd0;
+  --color-rule: #ded8cb;
+  --color-hair: #f0ece4;
+  --color-edge: #d6cfbf;
+  --color-stone: #cfc8b8;
+  --color-body: #3a3731;
+  --color-muted: #57534a;
+  --color-faint: #6e695e;
+
+  --color-voice: #e0521f;
+  --color-live: #ff6b3d;
+  --color-wave: #ff8a5c;
+  --color-pill: #17161a;
+  --color-ok: #7fd8a4;
+  --color-warn: #ffb38f;
+
+  --color-teal: #0f766e;
+  --color-teal-ink: #0f5f58;
+  --color-teal-wash: #e6f2ef;
+  --color-blue: #2f46c8;
+  --color-blue-wash: #e9ecfb;
+  --color-rust: #a33b12;
+  --color-rust-wash: #fbe9e1;
+  --color-amber: #d08a00;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+/* Like a native window: the page itself never scrolls or bounces; only
+   the content columns inside it scroll, without rubber-banding. */
+html,
+body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+.scroll {
+  overflow-y: auto;
+  overscroll-behavior: none;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+/* The main window is paper; the pill and the popover float on nothing. */
+html[data-window="main"] body {
+  background: var(--color-paper);
+}
+html[data-window="pill"],
+html[data-window="pill"] body,
+html[data-window="popover"],
+html[data-window="popover"] body {
+  background: transparent;
+  overflow: hidden;
+}
+
+input,
+textarea,
+.selectable {
+  user-select: text;
+  cursor: auto;
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-blue);
+  outline-offset: 2px;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes pill-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.pill-in {
+  animation: pill-in 160ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pill-in {
+    animation: none;
+  }
+}
