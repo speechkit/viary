@@ -8,7 +8,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use speechkit::{AudioBuffer, audio::encode_wav_pcm16};
+use speechkit::{AudioBuffer, audio::encode_wav};
 
 /// The most entries kept; older ones drop off.
 const MAX_ENTRIES: usize = 1000;
@@ -165,7 +165,7 @@ impl History {
         let name = format!("{id}.wav");
         let result = fs::create_dir_all(&self.recordings)
             .map_err(|e| e.to_string())
-            .and_then(|()| encode_wav_pcm16(audio).map_err(|e| e.to_string()))
+            .and_then(|()| encode_wav(audio).map_err(|e| e.to_string()))
             .and_then(|bytes| {
                 fs::write(self.recordings.join(&name), bytes).map_err(|e| e.to_string())
             });

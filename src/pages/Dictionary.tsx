@@ -45,11 +45,11 @@ function engineNote(s: Snapshot): string {
   if (!active) return "Choose a voice engine to use the dictionary.";
   switch (active.dictionary) {
     case "hotwords":
-      return `${active.kind}: words are used as hotwords while you speak, and “When I say” phrases are replaced after recognition. Strong words are favored more.`;
+      return `${active.kind}: words are used as hotwords while you speak, and “When I say” phrases are replaced after recognition.`;
     case "prompt":
       return `${active.kind}: words are given to the engine as context, and “When I say” phrases are replaced after recognition.`;
     default:
-      return `${active.kind}: this engine takes no word list, so words are applied as replacements after recognition. Add what it writes instead under “When I say”.`;
+      return `${active.kind} does not support recognition hotwords. To correct a mishearing, enter the engine’s incorrect spelling under “When I say”; “Write as” alone only restores capitalization. For example: “通易千问” → “通义千问”.`;
   }
 }
 
@@ -131,11 +131,13 @@ function AppPicker({
 function Editor({
   entry,
   apps,
+  replacementsOnly,
   onDone,
   onError,
 }: {
   entry: DictionaryEntry;
   apps: string[];
+  replacementsOnly: boolean;
   onDone: () => void;
   onError: (e: string) => void;
 }) {
@@ -176,15 +178,18 @@ function Editor({
         </label>
         <label className="flex flex-col gap-1.5 text-[13px]">
           <span className="font-medium">
-            When I say <span className="font-normal text-faint">· optional</span>
+            When I say <span className="font-normal text-faint">· {replacementsOnly ? "needed for corrections" : "optional"}</span>
           </span>
           <input
             className={input}
             spellCheck={false}
-            placeholder="What the engine writes instead, like “may lin”"
+            placeholder="Incorrect spelling, e.g. 通易千问, may lin"
             value={say}
             onChange={(e) => setSay(e.target.value)}
           />
+          <span className="text-xs leading-[1.45] text-muted">
+            Copy the incorrect spelling from History. Separate alternatives with commas.
+          </span>
         </label>
       </div>
       <div className="flex flex-wrap gap-x-8 gap-y-3">
@@ -201,9 +206,9 @@ function Editor({
           />
         </div>
         <div className="flex flex-col gap-1.5 text-[13px]">
-          <span className="font-medium">Boost</span>
+          <span className="font-medium">Prompt priority</span>
           <Seg
-            label="Boost"
+            label="Prompt priority"
             value={draft.boost}
             options={[
               ["normal", "Normal"],
@@ -211,6 +216,7 @@ function Editor({
             ]}
             onChange={(boost) => setDraft({ ...draft, boost })}
           />
+          <span className="text-xs text-muted">Strong words get priority in prompts.</span>
         </div>
         <div className="flex min-w-0 grow flex-col gap-1.5 text-[13px]">
           <span className="font-medium">Apps</span>
@@ -231,7 +237,7 @@ function Editor({
 
 const COLUMNS = "grid grid-cols-[2fr_2fr_1fr_1.4fr_112px] gap-4";
 
-function Row({ entry, onEdit, onError }: { entry: DictionaryEntry; onEdit: () => void; onError: (e: string) => void }) {
+function Row({ entry, replacementsOnly, onEdit, onError }: { entry: DictionaryEntry; replacementsOnly: boolean; onEdit: () => void; onError: (e: string) => void }) {
   return (
     <div className={`${COLUMNS} items-center border-b border-hair px-5 py-3.5 last:border-b-0`}>
       <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
@@ -245,7 +251,7 @@ function Row({ entry, onEdit, onError }: { entry: DictionaryEntry; onEdit: () =>
         )}
       </span>
       <span className="truncate text-sm text-muted" title={entry.soundsLike.join(", ")}>
-        {entry.soundsLike.length ? entry.soundsLike.join(", ") : "—"}
+        {entry.soundsLike.length ? entry.soundsLike.join(", ") : replacementsOnly ? "Add incorrect spelling to correct" : "—"}
       </span>
       <span className="text-[13px]">{entry.boost === "strong" ? "Strong" : "Normal"}</span>
       <span className="truncate text-[13px] text-muted" title={entry.apps.join(", ")}>
@@ -277,6 +283,7 @@ export function DictionaryPage({ s }: { s: Snapshot }) {
   const shown = words.filter((w) => matches(w, filter));
   const full = words.length >= MAX_WORDS;
   const apps = knownApps(history);
+  const replacementsOnly = s.engine.active?.dictionary === "replacements";
 
   return (
     <main className="flex max-w-[1100px] flex-col gap-5 px-12 pt-9 pb-12">
@@ -301,11 +308,16 @@ export function DictionaryPage({ s }: { s: Snapshot }) {
 
       <ErrorBanner error={error} onDismiss={() => setError("")} />
 
+      <div className="rounded-[10px] border border-line bg-paper px-4 py-3 text-[13px] leading-[1.5] text-muted">
+        {engineNote(s)}
+      </div>
+
       {editing && (
         <Editor
           key={editing.id || "new"}
           entry={editing}
           apps={apps}
+          replacementsOnly={replacementsOnly}
           onError={setError}
           onDone={() => setEditing(null)}
         />
@@ -354,12 +366,12 @@ export function DictionaryPage({ s }: { s: Snapshot }) {
         <div className={`${COLUMNS} border-b border-sand px-5 py-3 text-xs font-semibold tracking-[.04em] text-faint uppercase`}>
           <span>Write as</span>
           <span>When I say</span>
-          <span>Boost</span>
+          <span>Priority</span>
           <span>Apps</span>
           <span className="sr-only">Actions</span>
         </div>
         {shown.map((entry) => (
-          <Row key={entry.id} entry={entry} onEdit={() => setEditing(entry)} onError={setError} />
+          <Row key={entry.id} entry={entry} replacementsOnly={replacementsOnly} onEdit={() => setEditing(entry)} onError={setError} />
         ))}
         {shown.length === 0 && (
           <div className="flex flex-col items-center gap-1.5 px-5 py-12 text-center">
@@ -374,7 +386,6 @@ export function DictionaryPage({ s }: { s: Snapshot }) {
         )}
       </div>
 
-      <span className="text-xs leading-[1.45] text-muted">{engineNote(s)}</span>
     </main>
   );
 }

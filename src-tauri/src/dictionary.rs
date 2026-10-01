@@ -7,8 +7,6 @@
 
 use std::path::Path;
 
-use speechkit::sherpa::Hotword;
-
 use crate::settings::{Boost, DictionaryEntry};
 
 /// The most words: speechkit takes at most 256 hotwords, engine and session
@@ -16,8 +14,6 @@ use crate::settings::{Boost, DictionaryEntry};
 pub const MAX_WORDS: usize = 256;
 /// The longest word or phrase, as speechkit allows for a hotword.
 const MAX_CHARS: usize = 64;
-/// The boost of a Strong word; Normal ones take speechkit's 2.0.
-const STRONG_BOOST: f32 = 3.5;
 /// Prompts for Qwen3-ASR and FunASR-Nano hold at most 64 characters.
 const MAX_MODEL_PROMPT: usize = 64;
 /// OpenAI reads only the last 224 tokens of a prompt; the glossary stays
@@ -93,11 +89,21 @@ pub fn tidy(entry: DictionaryEntry) -> Result<DictionaryEntry, String> {
 }
 
 /// What an engine load depends on: a change to anything else, such as a
-/// "When I say" phrase, needs no reload.
-pub fn load_inputs(entries: &[DictionaryEntry]) -> Vec<(String, Boost, bool)> {
+/// "When I say" phrase, needs no reload. Priority only orders the words of a
+/// prompt, so `priority` is whether the engine takes one: hotwords have none.
+pub fn load_inputs(
+    entries: &[DictionaryEntry],
+    priority: bool,
+) -> Vec<(String, Option<Boost>, bool)> {
     entries
         .iter()
-        .map(|e| (e.word.clone(), e.boost, e.apps.is_empty()))
+        .map(|e| {
+            (
+                e.word.clone(),
+                priority.then_some(e.boost),
+                e.apps.is_empty(),
+            )
+        })
         .collect()
 }
 
@@ -155,9 +161,9 @@ impl Tokens {
 
 /// A transducer's view of the words: every word as it should be spelled for
 /// the model, split into the ones for every app, which load with the engine
-/// with their boost, and the app-only ones, which sessions add as hints.
+/// as phrases, and the app-only ones, which sessions add as hints.
 pub struct TransducerWords {
-    pub every_app: Vec<Hotword>,
+    pub every_app: Vec<String>,
     pub app_only: Vec<String>,
 }
 
@@ -176,11 +182,7 @@ pub fn transducer_words(entries: &[DictionaryEntry], upper: bool) -> TransducerW
     for entry in entries.iter().filter(|e| hotword_syntax_ok(&e.word)) {
         let word = spell(&entry.word);
         if entry.apps.is_empty() {
-            let hotword = Hotword::new(word);
-            words.every_app.push(match entry.boost {
-                Boost::Strong => hotword.with_boost(STRONG_BOOST),
-                Boost::Normal => hotword,
-            });
+            words.every_app.push(word);
         } else if !words.app_only.contains(&word) {
             words.app_only.push(word);
         }
@@ -223,7 +225,7 @@ fn prompt_words(entries: &[DictionaryEntry]) -> impl Iterator<Item = &str> {
 /// The prompt words for Qwen3-ASR or FunASR-Nano: as many as fit in the
 /// 64 characters speechkit allows, joined with commas. FunASR-Nano also
 /// takes no `;`, `；` or `，`.
-pub fn model_prompt(entries: &[DictionaryEntry], funasr: bool) -> Vec<Hotword> {
+pub fn model_prompt(entries: &[DictionaryEntry], funasr: bool) -> Vec<String> {
     let mut words = Vec::new();
     let mut total = 0;
     for word in prompt_words(entries) {
@@ -233,7 +235,7 @@ pub fn model_prompt(entries: &[DictionaryEntry], funasr: bool) -> Vec<Hotword> {
             continue;
         }
         total += len;
-        words.push(Hotword::new(word));
+        words.push(word.to_owned());
     }
     words
 }
@@ -434,8 +436,7 @@ mod tests {
         ];
         let split = transducer_words(&words, true);
         assert_eq!(split.every_app.len(), 1);
-        assert_eq!(split.every_app[0].text, "SPEECHKIT");
-        assert_eq!(split.every_app[0].boost, Some(STRONG_BOOST));
+        assert_eq!(split.every_app[0], "SPEECHKIT");
         assert_eq!(split.app_only, ["ZIPFORMER"]);
         let accepted = split.app_only.clone();
         assert_eq!(
@@ -443,6 +444,23 @@ mod tests {
             ["ZIPFORMER"]
         );
         assert!(session_hints(&words, "Mail", &accepted, true).is_empty());
+    }
+
+    #[test]
+    fn only_a_prompt_reloads_for_a_change_of_priority() {
+        let words = [entry("speechkit", &[], &[])];
+        let mut strong = words.clone();
+        strong[0].boost = Boost::Strong;
+        assert_ne!(load_inputs(&words, true), load_inputs(&strong, true));
+        assert_eq!(load_inputs(&words, false), load_inputs(&strong, false));
+        // Where a word applies reloads either kind of engine, and a "When I
+        // say" phrase reloads neither.
+        let mut moved = words.clone();
+        moved[0].apps = vec!["Slack".into()];
+        assert_ne!(load_inputs(&words, false), load_inputs(&moved, false));
+        let mut said = words.clone();
+        said[0].sounds_like.push("speech kit".into());
+        assert_eq!(load_inputs(&words, true), load_inputs(&said, true));
     }
 
     #[test]
@@ -476,7 +494,7 @@ mod tests {
             .map(|i| entry(&format!("word{i:02}"), &[], &[]))
             .collect();
         let prompt = model_prompt(&words, false);
-        let joined: Vec<_> = prompt.iter().map(|h| h.text.as_str()).collect();
+        let joined: Vec<_> = prompt.iter().map(String::as_str).collect();
         assert!(joined.join(",").chars().count() <= MAX_MODEL_PROMPT);
         assert_eq!(prompt.len(), 9, "6 + 8 × 7 = 62 characters");
         assert!(model_prompt(&[entry("a；b", &[], &[])], true).is_empty());

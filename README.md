@@ -1,6 +1,6 @@
 # Viary
 
-A macOS menu bar dictation app: hold a key, speak, release, and the text is pasted where your cursor is. Built with Tauri 2, React, and Tailwind on [speechkit](https://crates.io/crates/speechkit) 0.3.
+A macOS menu bar dictation app: hold a key, speak, release, and the text is pasted where your cursor is. Built with Tauri 2, React, and Tailwind on [speechkit](https://crates.io/crates/speechkit) 0.5.0.
 
 ## Run
 
@@ -20,17 +20,27 @@ The first run opens the main window. Then:
 | Piece | Where |
 |---|---|
 | Hold-to-talk key: a listen-only CGEventTap on modifier flags | `src-tauri/src/macos/hotkey.rs` |
-| Microphone: `speechkit::io::Microphone::listen` feeds a small tap backend, so each chunk is recorded (for Retry), metered (for the waveform), and pushed into the engine session. Audio waits in a backlog while a cloud session connects | `src-tauri/src/tap.rs` |
+| Microphone: `Microphone::capture` and `Capture::listen` retain audio for Retry and buffer it while a cloud session connects. `Listening::level` and `LiveTranscript` supply the waveform and live text through one observer; key-up calls `stop` immediately, then `finish` waits on a worker | `src-tauri/src/recording.rs` |
 | The dictation state machine: listen, transcribe, paste, Undo / Use raw, and Retry / switch engine with the kept audio | `src-tauri/src/dictation.rs` |
-| Engines: `SherpaAsrConfig::validate` detects picked folders; streaming vs. offline (behind silero VAD) load with `SherpaAsr`, plus OpenAI (file or Realtime) and DashScope | `src-tauri/src/engines.rs` |
+| Engines: `sherpa::inspect` detects picked folders without native code; streaming vs. offline (behind silero VAD) load with `AsrConfig::load`, plus OpenAI (file or Realtime) and DashScope | `src-tauri/src/engines.rs` |
 | Switching engines between dictations, debounced, keeping the old one until the new one loads | `src-tauri/src/reload.rs` |
 | API keys in the Keychain (`app.viary.api-key`); never sent to the web view | `src-tauri/src/keychain.rs` |
 | Pasting: the pasteboard is saved, ⌘V posted, then restored; without a focused text field the text stays on the clipboard | `src-tauri/src/macos/` |
 | History and recordings, kept for the chosen number of days | `src-tauri/src/history.rs` |
 | Dictionary: hotwords for transducers (with `bpe.vocab`, or Chinese-character models), a prompt for Qwen3-ASR, FunASR-Nano and OpenAI file mode, and "When I say" replacements after recognition for every engine | `src-tauri/src/dictionary.rs` |
-| Polish & tone: an OpenAI-compatible chat model (a local server such as Ollama, OpenAI, or DashScope) rewrites the text before it is pasted, with a tone per app; if it fails, the text goes in as recognized | `src-tauri/src/polish.rs` |
+| Polish & tone: an OpenAI-compatible chat model (a local server such as Ollama, a custom endpoint with its own optional Keychain API key, OpenAI, or DashScope) rewrites the text before it is pasted, with a tone per app; if it fails, the text goes in as recognized | `src-tauri/src/polish.rs` |
+
+Recognition results stay as `Transcript` through dictation, Retry, and History; dictionary and punctuation processing update its segment text before `.text()` joins it. The raw text is saved before these edits.
 
 Punctuation: engines that punctuate natively (SenseVoice, cloud) are used as-is. For the others, an optional sherpa-onnx punctuation model runs after the session, so "Use raw" can put back the recognizer's own text.
+
+SenseVoice waits for 1 second of silence before ending an utterance, keeping brief thinking pauses together to reduce unwanted sentence breaks. Releasing the hold-to-talk key flushes the remaining speech immediately.
+
+Dictionary priority: Strong words are prioritized when fitting model prompts. speechkit 0.5 accepts transducer hotwords as plain phrases, so each phrase uses the backend's default boost.
+
+Engines such as SenseVoice do not support recognition hotwords. With these engines, set **Write as** to the correct spelling and **When I say** to the incorrect spelling from History (for example, `通义千问` and `通易千问`). A word without an incorrect spelling only restores capitalization; it cannot correct a mishearing.
+
+For an independent polish service, choose **Custom** under **Polish & tone** to connect to an OpenAI-compatible chat API. Enter its API base URL and chat model ID, and an API key if required. **Test connection** uses the current form without saving it; **Save** stores the settings and puts the key in a separate macOS Keychain entry. Leave the key field blank to keep a stored key, or use **Remove key** for an unauthenticated server. OpenAI and DashScope presets continue to reuse Voice engine credentials. Only transcripts are sent for polishing; the destination is shown in the model card.
 
 ## Tests
 

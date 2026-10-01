@@ -11,7 +11,7 @@ mod macos;
 mod polish;
 mod reload;
 mod settings;
-mod tap;
+mod recording;
 mod ui;
 
 use std::{
@@ -21,7 +21,10 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use speechkit::{audio::read_wav_pcm16, sherpa::ExecutionProvider};
+use speechkit::{
+    audio::{DecodeLimits, read},
+    sherpa::Provider as ExecutionProvider,
+};
 use tauri::{AppHandle, Manager, State, tray::TrayIconBuilder};
 
 use crate::{
@@ -145,6 +148,7 @@ fn err(error: impl std::fmt::Display) -> String {
 struct Keys {
     open_ai: bool,
     dash_scope: bool,
+    custom_polish: bool,
 }
 
 #[derive(Serialize)]
@@ -176,6 +180,7 @@ fn get_state(state: State<'_, App>) -> Snapshot {
         keys: Keys {
             open_ai: keychain::has(Provider::OpenAi),
             dash_scope: keychain::has(Provider::DashScope),
+            custom_polish: keychain::has(Provider::CustomPolish),
         },
         permissions: permissions::check(),
         hotkey_active: state.hotkey.get().is_some_and(HotkeyListener::is_active),
@@ -196,7 +201,7 @@ struct Microphone {
 
 #[tauri::command]
 fn list_microphones() -> CmdResult<Vec<Microphone>> {
-    Ok(speechkit::io::input_devices()
+    Ok(speechkit::io::Microphone::list()
         .map_err(|e| engines::describe(&e))?
         .into_iter()
         .map(|d| Microphone {
@@ -210,9 +215,8 @@ fn list_microphones() -> CmdResult<Vec<Microphone>> {
 // Engines
 
 #[tauri::command]
-fn inspect_model(state: State<'_, App>, path: PathBuf) -> CmdResult<ModelInspection> {
-    let vad = state.settings().vad_model;
-    engines::inspect(&path, vad.as_deref()).map_err(|e| engines::describe(&e))
+fn inspect_model(path: PathBuf) -> CmdResult<ModelInspection> {
+    engines::inspect(&path).map_err(|e| engines::describe(&e))
 }
 
 #[tauri::command]
@@ -222,8 +226,7 @@ fn add_local_model(
     path: PathBuf,
     family: String,
 ) -> CmdResult<String> {
-    let vad = state.settings().vad_model;
-    let inspection = engines::inspect(&path, vad.as_deref()).map_err(|e| engines::describe(&e))?;
+    let inspection = engines::inspect(&path).map_err(|e| engines::describe(&e))?;
     if !inspection.families.iter().any(|f| f.id == family) {
         return Err(format!("this folder is not a {family} model"));
     }
@@ -277,8 +280,9 @@ fn set_vad_model(app: AppHandle, state: State<'_, App>, path: Option<PathBuf>) -
     Ok(())
 }
 
-/// Checking a punctuation model means loading it, so this runs off the
-/// main thread.
+/// Checking a punctuation model reads through its folder, which can be
+/// large, so this runs off the main thread. The check does not load the
+/// model: see `engines::check_punct`.
 #[tauri::command]
 async fn set_punct_model(app: AppHandle, path: Option<PathBuf>) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -309,10 +313,11 @@ fn set_dashscope(app: AppHandle, state: State<'_, App>, dashscope: DashScopeSett
     ui::refresh(&app);
 }
 
-fn provider_engine(provider: Provider) -> &'static str {
+fn provider_engine(provider: Provider) -> Option<&'static str> {
     match provider {
-        Provider::OpenAi => engines::OPENAI,
-        Provider::DashScope => engines::DASHSCOPE,
+        Provider::OpenAi => Some(engines::OPENAI),
+        Provider::DashScope => Some(engines::DASHSCOPE),
+        Provider::CustomPolish => None,
     }
 }
 
@@ -324,7 +329,9 @@ fn save_api_key(
     key: String,
 ) -> CmdResult<()> {
     keychain::save(provider, &key)?;
-    state.reload_if_active(&app, |id| id == provider_engine(provider));
+    if let Some(engine) = provider_engine(provider) {
+        state.reload_if_active(&app, |id| id == engine);
+    }
     ui::refresh(&app);
     Ok(())
 }
@@ -333,7 +340,9 @@ fn save_api_key(
 fn delete_api_key(app: AppHandle, state: State<'_, App>, provider: Provider) -> CmdResult<()> {
     keychain::delete(provider)?;
     // The loaded engine holds its own copy of the key: stop using it.
-    state.forget_engine(provider_engine(provider));
+    if let Some(engine) = provider_engine(provider) {
+        state.forget_engine(engine);
+    }
     ui::refresh(&app);
     Ok(())
 }
@@ -422,12 +431,15 @@ impl App {
     /// words (as hotwords or a prompt) and they changed.
     fn dictionary_changed(&self, app: &AppHandle, before: &[DictionaryEntry]) {
         let after = self.settings().dictionary;
-        if dictionary::load_inputs(before) == dictionary::load_inputs(&after) {
-            return;
-        }
         let status = self.engines.status();
         let settled = status.loading.is_none() && status.failed.is_none();
-        if settled && status.active.is_some_and(|info| info.dictionary == "replacements") {
+        let uses = status.active.as_ref().map(|info| info.dictionary);
+        // Hotwords take no priority; an engine still loading may be any kind.
+        let priority = !(settled && uses == Some("hotwords"));
+        if dictionary::load_inputs(before, priority) == dictionary::load_inputs(&after, priority) {
+            return;
+        }
+        if settled && uses == Some("replacements") {
             return;
         }
         self.reload_if_active(app, |id| id.starts_with("local:") || id == engines::OPENAI);
@@ -494,6 +506,22 @@ fn set_app_tone(app: AppHandle, state: State<'_, App>, target: String, tone: Opt
     ui::refresh(&app);
 }
 
+/// Tests a model draft without saving its settings or exposing a stored key.
+#[tauri::command]
+async fn test_polish_connection(
+    app: AppHandle,
+    patch: serde_json::Map<String, serde_json::Value>,
+    key: Option<String>,
+) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = app.state::<App>().settings();
+        settings.polish = settings.polish.patched(patch)?;
+        polish::test_connection(&settings, key)
+    })
+    .await
+    .map_err(err)?
+}
+
 /// Polishes `text` as if dictated into `app`, for the Polish page.
 #[tauri::command]
 async fn polish_preview(app: AppHandle, target: String, text: String) -> CmdResult<String> {
@@ -553,16 +581,16 @@ async fn history_retranscribe(app: AppHandle, id: String) -> CmdResult<()> {
             .engines
             .current()
             .ok_or("choose a voice engine first")?;
-        let audio = read_wav_pcm16(&path).map_err(|e| engines::describe(&e))?;
+        let audio = read(&path, DecodeLimits::new(recording::MAX_RECORDING))
+            .map_err(|e| engines::describe(&e))?;
         let settings = state.settings();
         let options = loaded.session_options(&settings, &entry.app);
         let outcome = loaded
             .engine
             .transcribe(&audio, options, Instant::now() + Duration::from_secs(300))
             .map_err(|failure| engines::describe(&failure.error))?;
-        let segments = dictation::texts(&outcome.transcript);
-        let raw = engines::join(&segments);
-        let mut text = dictation::finish(&settings, &entry.app, Some(&loaded), &segments);
+        let raw = outcome.text();
+        let mut text = dictation::finish(&settings, &entry.app, Some(&loaded), outcome);
         if polish::applies(&settings, &entry.app) {
             match polish::request(&settings, &entry.app).and_then(|r| r.run(&text, polish::TIMEOUT)) {
                 Ok(polished) => text = polished,
@@ -750,6 +778,7 @@ pub fn run() {
             update_polish,
             set_app_tone,
             polish_preview,
+            test_polish_connection,
             history_list,
             history_delete,
             history_retranscribe,

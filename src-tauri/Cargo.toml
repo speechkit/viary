@@ -21,7 +21,7 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-speechkit = { version = "0.3", features = ["sherpa", "openai", "dashscope", "capture"] }
+speechkit = { version = "0.5.0", features = ["sherpa", "openai", "dashscope", "devices"] }
 # Blocking HTTP for the polish model, called from worker threads.
 ureq = { version = "2.12", features = ["json"] }
 

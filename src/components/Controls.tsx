@@ -5,6 +5,8 @@ import { Icon } from "./Icons";
 
 export const btn =
   "inline-flex h-8 shrink-0 items-center whitespace-nowrap gap-2 rounded-lg border border-edge bg-white px-3 text-[13px] font-medium text-ink disabled:opacity-50";
+export const btnDanger =
+  "inline-flex h-8 shrink-0 items-center whitespace-nowrap gap-2 rounded-lg border border-rust bg-rust px-3 text-[13px] font-medium text-white hover:border-[#8a3010] hover:bg-[#8a3010] disabled:opacity-50";
 export const btnPrimary =
   "inline-flex h-8 shrink-0 items-center whitespace-nowrap gap-2 rounded-lg border border-ink bg-ink px-3 text-[13px] font-medium text-white disabled:opacity-40";
 export const input =

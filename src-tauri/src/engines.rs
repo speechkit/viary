@@ -16,12 +16,15 @@ use std::{
 use serde::Serialize;
 use speechkit::{
     SpeechError,
-    asr::{AsrEngine, SegmentPostProcessor, SessionOptions},
+    asr::{AsrEngine, AsrOptions, PostProcessor},
     cloud::{
-        CloudRuntime, DashScopeAsr, DashScopeAsrConfig, OpenAiHttp, OpenAiHttpConfig,
-        OpenAiRealtime, OpenAiRealtimeConfig,
+        CloudRuntime, DashScopeAsr, DashScopeAsrConfig, OpenAiRealtime, OpenAiRealtimeConfig,
+        OpenAiTranscription, OpenAiTranscriptionConfig,
     },
-    sherpa::{AsrFamily, Hotword, Inference, SherpaAsr, SherpaAsrConfig, SherpaPunctuation},
+    sherpa::{
+        AsrConfig, AsrFamily, Inference, Punctuation, PunctuationConfig, PunctuationFamily,
+        SileroVadConfig,
+    },
 };
 
 use crate::{
@@ -156,81 +159,33 @@ pub struct ModelInspection {
     pub vad_nearby: Option<PathBuf>,
 }
 
-/// A stand-in VAD file for inspecting a folder before the user has chosen
-/// silero_vad.onnx. `SherpaAsrConfig::validate` needs a VAD file for an
-/// offline family and checks only that it exists and is not empty; it
-/// never loads it, and nothing is built from this configuration.
-fn vad_stand_in() -> Result<PathBuf, SpeechError> {
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    if let Some(path) = PATH.get() {
-        return Ok(path.clone());
+/// Detects model families from the files without loading native code.
+pub fn inspect(dir: &Path) -> Result<ModelInspection, SpeechError> {
+    let mut families = speechkit::sherpa::inspect(dir)?.asr;
+    if families.is_empty() {
+        return Err(SpeechError::InvalidModel(
+            "this folder has no recognition model".into(),
+        ));
     }
-    let path = std::env::temp_dir().join("viary-inspect-vad-stand-in");
-    std::fs::write(&path, b"stand-in")
-        .map_err(|e| SpeechError::backend("viary", true, e))?;
-    Ok(PATH.get_or_init(|| path).clone())
-}
-
-/// Detects a model folder's families without loading it. `vad` is the
-/// silero VAD to check offline families against, if one is chosen.
-///
-/// # Errors
-///
-/// `InvalidModel` or `InvalidInput` naming what is missing or
-/// unrecognized.
-pub fn inspect(dir: &Path, vad: Option<&Path>) -> Result<ModelInspection, SpeechError> {
-    let vad_nearby = find_vad(dir);
-    let probe = match vad.map(Path::to_path_buf).or_else(|| vad_nearby.clone()) {
-        Some(vad) => vad,
-        None => vad_stand_in()?,
-    };
-    let offline = |family: Option<AsrFamily>| {
-        let config = SherpaAsrConfig::offline(dir, &probe);
-        match family {
-            Some(family) => config.with_family(family),
-            None => config,
-        }
-        .validate()
-    };
-    let streaming = SherpaAsrConfig::streaming(dir).validate().is_ok();
-    let (layout, families) = match offline(None) {
-        Ok(AsrFamily::OfflineTransducer) => {
-            // Streaming and offline transducers share one layout;
-            // sherpa-onnx archives say which in the folder's name.
-            let named_streaming = dir
-                .file_name()
-                .map(|name| name.to_string_lossy().to_lowercase())
-                .is_some_and(|name| name.contains("streaming") || name.contains("online"));
-            let mut families = vec![AsrFamily::OfflineTransducer];
-            if streaming {
-                if named_streaming {
-                    families.insert(0, AsrFamily::StreamingTransducer);
-                } else {
-                    families.push(AsrFamily::StreamingTransducer);
-                }
-            }
-            ("transducer", families)
-        }
-        Ok(family) => ("single-model", vec![family]),
-        // One model and tokens.txt without SenseVoice's language markers:
-        // Paraformer or FireRedASR CTC, and the markers' absence proves
-        // nothing about SenseVoice, so the user picks.
-        Err(error @ SpeechError::InvalidInput(_)) => {
-            let candidates: Vec<AsrFamily> = [
-                AsrFamily::Paraformer,
-                AsrFamily::FireRedCtc,
-                AsrFamily::SenseVoice,
-            ]
-            .into_iter()
-            .filter(|family| offline(Some(*family)).is_ok())
-            .collect();
-            if candidates.is_empty() {
-                return Err(error);
-            }
-            ("single-model", candidates)
-        }
-        Err(_) if streaming => ("streaming transducer", vec![AsrFamily::StreamingTransducer]),
-        Err(error) => return Err(error),
+    // Prefer offline unless the folder itself names a streaming model.
+    let named_streaming = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .is_some_and(|name| name.contains("streaming") || name.contains("online"));
+    if families.contains(&AsrFamily::OfflineTransducer) && !named_streaming {
+        families.sort_by_key(|family| *family != AsrFamily::OfflineTransducer);
+    }
+    // A single model whose tokens lack SenseVoice's language markers fits it
+    // too, and speechkit lists it first, but the published SenseVoice models
+    // have the markers: such a folder is Paraformer or FireRedASR CTC far more
+    // often. The first family is the one the Voice engine screen preselects.
+    if families.len() > 1 {
+        families.sort_by_key(|family| *family == AsrFamily::SenseVoice);
+    }
+    let layout = if families.contains(&AsrFamily::OfflineTransducer) {
+        "transducer"
+    } else {
+        "single-model"
     };
     Ok(ModelInspection {
         path: dir.to_path_buf(),
@@ -238,7 +193,7 @@ pub fn inspect(dir: &Path, vad: Option<&Path>) -> Result<ModelInspection, Speech
         layout: layout.into(),
         families: families.into_iter().map(family_info).collect(),
         size_bytes: folder_size(dir, 3),
-        vad_nearby,
+        vad_nearby: find_vad(dir),
     })
 }
 
@@ -276,27 +231,41 @@ fn find_vad(dir: &Path) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Checks a punctuation model folder by loading it: speechkit has no
-/// lighter check. Slow; call off the main thread.
+/// The punctuation family of the model in `dir`, from its files.
 ///
-/// # Errors
-///
-/// `InvalidModel` if it is not one.
-pub fn check_punct(dir: &Path) -> Result<(), SpeechError> {
-    SherpaPunctuation::load(dir).map(drop)
+/// Not `PunctuationConfig::validate`, which takes any folder with a
+/// `model*.onnx`, a recognition model's included. Nothing may then load such
+/// a folder as punctuation: sherpa-onnx exits the whole process for a model of
+/// another kind, and aborts it for a corrupt one. `inspect` also reads the
+/// other files, so it tells a recognition model apart.
+fn punct_family(dir: &Path) -> Result<PunctuationFamily, SpeechError> {
+    let found = speechkit::sherpa::inspect(dir)?;
+    let message = if found.asr.is_empty() {
+        "this folder has no punctuation model"
+    } else {
+        "this is a recognition model; choose a punctuation model folder"
+    };
+    found
+        .punctuation
+        .ok_or_else(|| SpeechError::InvalidModel(message.into()))
 }
 
-/// What kind of punctuation model `dir` holds, from its files: the
-/// CNN-BiLSTM model comes with `bpe.vocab`.
+/// Checks that `dir` holds a punctuation model, from its files alone: see
+/// [`punct_family`] for why it is not loaded.
+pub fn check_punct(dir: &Path) -> Result<(), SpeechError> {
+    punct_family(dir).map(drop)
+}
+
+/// The punctuation family described by its files.
 pub fn punct_kind(dir: &Path) -> Option<String> {
-    if !dir.is_dir() {
-        return None;
-    }
-    Some(if dir.join("bpe.vocab").is_file() {
-        "CNN-BiLSTM (English)".into()
-    } else {
-        "CT-Transformer (Chinese and English)".into()
-    })
+    Some(
+        match punct_family(dir).ok()? {
+            PunctuationFamily::CnnBiLstm => "CNN-BiLSTM (English)",
+            PunctuationFamily::CtTransformer => "CT-Transformer (Chinese and English)",
+            _ => return None,
+        }
+        .into(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +295,7 @@ pub struct LoadedEngine {
     pub engine: AsrEngine,
     /// Applied to each committed segment after the session, so the raw
     /// text stays available for "Use raw".
-    pub punct: Option<Arc<SherpaPunctuation>>,
+    pub punct: Option<Arc<Punctuation>>,
     pub info: EngineInfo,
     /// App-only dictionary words the model accepted as hotwords, spelled
     /// for it, for sessions in those apps to add as hints.
@@ -338,14 +307,14 @@ pub struct LoadedEngine {
 impl LoadedEngine {
     /// Session options for a dictation in `app`: the chosen language, when
     /// the engine takes one, and the app's own dictionary words.
-    pub fn session_options(&self, settings: &Settings, app: &str) -> SessionOptions {
-        let mut options = SessionOptions::default();
+    pub fn session_options(&self, settings: &Settings, app: &str) -> AsrOptions {
+        let mut options = AsrOptions::default();
         if let Some(code) = settings.language.code()
             && self.info.language_override
         {
             options = options.with_language(code);
         }
-        if !self.session_words.is_empty() && self.engine.capabilities().session_hints {
+        if !self.session_words.is_empty() && self.engine.capabilities().accepts_hints {
             let hints = dictionary::session_hints(&settings.dictionary, app, &self.session_words, self.upper_case);
             if !hints.is_empty() {
                 options = options.with_hints(hints);
@@ -354,38 +323,17 @@ impl LoadedEngine {
         options
     }
 
-    /// The text to insert: each segment punctuated if a model is loaded.
-    pub fn finish_text(&self, segments: &[String]) -> String {
-        let parts: Vec<String> = segments
-            .iter()
-            .map(|text| match &self.punct {
-                Some(punct) if !text.trim().is_empty() => {
-                    punct.process(text).unwrap_or_else(|error| {
-                        tracing::warn!(%error, "punctuation failed; keeping the raw text");
-                        text.clone()
-                    })
-                }
-                _ => text.clone(),
-            })
-            .collect();
-        join(&parts)
+    /// Punctuates one segment, keeping its original text if the model fails.
+    pub fn punctuate(&self, text: &mut String) {
+        if let Some(punct) = &self.punct
+            && !text.trim().is_empty()
+        {
+            match punct.process(text) {
+                Ok(punctuated) => *text = punctuated,
+                Err(error) => tracing::warn!(%error, "punctuation failed; keeping the raw text"),
+            }
+        }
     }
-}
-
-/// Joins segment texts the way `Transcript::text` does: spaces only
-/// between Latin text.
-pub fn join(parts: &[String]) -> String {
-    let segments = parts
-        .iter()
-        .enumerate()
-        .map(|(i, text)| speechkit::asr::Segment {
-            utterance: speechkit::asr::UtteranceId(i as u64),
-            text: text.clone(),
-            start: Duration::ZERO,
-            end: Duration::ZERO,
-        })
-        .collect();
-    speechkit::asr::Transcript::new(segments).text()
 }
 
 fn build(
@@ -415,10 +363,10 @@ fn build_local(
     let meta = family_info(family);
     let inference = Inference::default()
         .with_provider(settings.provider.parse()?)
-        .with_num_threads(settings.threads.clamp(1, 16));
+        .with_threads(settings.threads.clamp(1, 16));
     let dir = model.path.as_path();
     let config = if family == AsrFamily::StreamingTransducer {
-        SherpaAsrConfig::streaming(dir)
+        AsrConfig::streaming(dir)
     } else {
         // The chosen VAD, or one next to the model if that one is gone.
         let vad = settings
@@ -433,25 +381,35 @@ fn build_local(
                     meta.label
                 ))
             })?;
-        SherpaAsrConfig::offline(dir, vad).with_family(family)
+        let config = AsrConfig::offline(dir, &vad).with_family(family);
+        if family == AsrFamily::SenseVoice {
+            // Keep brief thinking pauses in one utterance, so SenseVoice
+            // does not punctuate each fragment as a complete sentence.
+            config.with_vad(SileroVadConfig::new(vad).with_min_silence(Duration::from_secs(1)))
+        } else {
+            config
+        }
     };
     let words = with_dictionary(config, family, dir, &settings.dictionary);
-    let built = AsrEngine::new(SherpaAsr::load(&words.config.with_inference(inference))?);
+    let built = AsrEngine::new(words.config.with_inference(inference).load()?);
     let caps = built.capabilities().clone();
     // Punctuation is optional: an unloadable model (moved, deleted, broken)
-    // leaves the engine usable with its raw text.
-    let punct = match (&settings.punct_model, caps.native_punctuation) {
-        (Some(punct_dir), false) => match SherpaPunctuation::load(punct_dir) {
-            Ok(punct) => Some(Arc::new(punct)),
-            Err(error) => {
-                tracing::warn!(
-                    error = %describe(&error),
-                    dir = %punct_dir.display(),
-                    "cannot load the punctuation model; dictating without it"
-                );
-                None
+    // leaves the engine usable with its raw text. Its files are checked first:
+    // a folder that is no longer a punctuation model would end the process.
+    let punct = match (&settings.punct_model, caps.punctuated) {
+        (Some(punct_dir), false) => {
+            match check_punct(punct_dir).and_then(|()| PunctuationConfig::new(punct_dir).load()) {
+                Ok(punct) => Some(Arc::new(punct)),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %describe(&error),
+                        dir = %punct_dir.display(),
+                        "cannot load the punctuation model; dictating without it"
+                    );
+                    None
+                }
             }
-        },
+        }
         _ => None,
     };
     Ok(LoadedEngine {
@@ -460,15 +418,15 @@ fn build_local(
             name: model.name.trim_start_matches("sherpa-onnx-").to_owned(),
             kind: meta.label.into(),
             on_device: true,
-            live: caps.partial_results,
-            punctuation: if caps.native_punctuation {
+            live: caps.reports_partials,
+            punctuation: if caps.punctuated {
                 "native"
             } else if punct.is_some() {
                 "model"
             } else {
                 "none"
             },
-            language_override: caps.language_override,
+            language_override: caps.accepts_language,
             dictionary: words.use_.as_str(),
         },
         engine: built,
@@ -480,7 +438,7 @@ fn build_local(
 
 /// A model's configuration with the dictionary in it, and what came of it.
 struct WithDictionary {
-    config: SherpaAsrConfig,
+    config: AsrConfig,
     use_: Use,
     session_words: Vec<String>,
     upper_case: bool,
@@ -491,18 +449,18 @@ struct WithDictionary {
 /// the model cannot take, such as characters it does not know, are left
 /// out rather than failing the load; replacements still apply them.
 fn with_dictionary(
-    config: SherpaAsrConfig,
+    config: AsrConfig,
     family: AsrFamily,
     dir: &Path,
     entries: &[DictionaryEntry],
 ) -> WithDictionary {
-    let plain = |config: SherpaAsrConfig, use_| WithDictionary {
+    let plain = |config: AsrConfig, use_| WithDictionary {
         config,
         use_,
         session_words: Vec::new(),
         upper_case: false,
     };
-    let fits = |hotwords: &[Hotword]| config.clone().with_hotwords(hotwords.to_vec()).validate().is_ok();
+    let fits = |hotwords: &[String]| config.clone().with_hotwords(hotwords.to_vec()).validate().is_ok();
     match family {
         AsrFamily::StreamingTransducer | AsrFamily::OfflineTransducer => {
             let tokens = dictionary::Tokens::read(dir);
@@ -511,17 +469,14 @@ fn with_dictionary(
                 return plain(config, Use::Replacements);
             }
             // Hotwords need what the model's tokens need.
-            if let Err(error) = config.clone().with_hotwords(Vec::<Hotword>::new()).validate() {
+            if let Err(error) = config.clone().with_hotwords(Vec::<String>::new()).validate() {
                 tracing::info!(error = %describe(&error), "the model takes no hotwords; the dictionary applies as replacements");
                 return plain(config, Use::Replacements);
             }
             let upper_case = tokens.upper_case;
             let words = dictionary::transducer_words(entries, upper_case);
             let every_app = accepted(words.every_app, &fits);
-            let session_words: Vec<String> = accepted(words.app_only.into_iter().map(Hotword::new).collect(), &fits)
-                .into_iter()
-                .map(|h| h.text)
-                .collect();
+            let session_words: Vec<String> = accepted(words.app_only, &fits);
             let skipped = entries.len().saturating_sub(every_app.len() + session_words.len());
             if skipped > 0 {
                 tracing::info!(skipped, "dictionary words the model cannot take as hotwords");
@@ -551,7 +506,7 @@ fn with_dictionary(
 
 /// The `hotwords` that `fits` accepts: all at once when it takes them, else
 /// by halves, so a few bad words cost a few checks, not one per word.
-fn accepted(hotwords: Vec<Hotword>, fits: &impl Fn(&[Hotword]) -> bool) -> Vec<Hotword> {
+fn accepted(hotwords: Vec<String>, fits: &impl Fn(&[String]) -> bool) -> Vec<String> {
     if hotwords.is_empty() || fits(&hotwords) {
         return hotwords;
     }
@@ -587,13 +542,13 @@ fn cloud_info(id: &str, name: String, kind: &str, built: &AsrEngine, dictionary:
         name,
         kind: kind.into(),
         on_device: false,
-        live: caps.partial_results,
-        punctuation: if caps.native_punctuation {
+        live: caps.reports_partials,
+        punctuation: if caps.punctuated {
             "native"
         } else {
             "none"
         },
-        language_override: caps.language_override,
+        language_override: caps.accepts_language,
         dictionary: dictionary.as_str(),
     }
 }
@@ -604,11 +559,13 @@ fn build_openai(settings: &Settings, runtime: &CloudRuntime) -> Result<LoadedEng
     let key = require_key(Provider::OpenAi, "OpenAI")?;
     let (built, kind, dictionary) = match openai.mode {
         OpenAiMode::File => {
-            let mut config = OpenAiHttpConfig::new(openai.base_url.trim(), model.as_str()).with_api_key(key);
+            let mut config = OpenAiTranscriptionConfig::new(model.as_str())
+                .with_endpoint(openai.base_url.trim())
+                .with_api_key(key);
             if let Some(prompt) = dictionary::openai_prompt(&settings.dictionary) {
                 config = config.with_prompt(prompt);
             }
-            (AsrEngine::new(OpenAiHttp::new(config, runtime.clone())?), "OpenAI", Use::Prompt)
+            (AsrEngine::new(OpenAiTranscription::new(config, runtime.clone())?), "OpenAI", Use::Prompt)
         }
         OpenAiMode::Realtime => (
             AsrEngine::new(OpenAiRealtime::new(
@@ -805,14 +762,14 @@ mod tests {
     #[test]
     fn hotwords_are_checked_by_halves() {
         let checks = std::cell::Cell::new(0);
-        let fits = |hotwords: &[Hotword]| {
+        let fits = |hotwords: &[String]| {
             checks.set(checks.get() + 1);
-            hotwords.iter().all(|h| !h.text.contains('7'))
+            hotwords.iter().all(|h| !h.contains('7'))
         };
-        let words: Vec<Hotword> = (0..64).map(|i| Hotword::new(format!("w{i}"))).collect();
+        let words: Vec<String> = (0..64).map(|i| format!("w{i}")).collect();
         let kept = accepted(words, &fits);
         assert_eq!(kept.len(), 58, "w7, w17, w27, w37, w47 and w57 are out");
-        assert!(kept.iter().all(|h| !h.text.contains('7')));
+        assert!(kept.iter().all(|h| !h.contains('7')));
         assert!(checks.get() < 64, "{} checks", checks.get());
     }
 
@@ -840,7 +797,7 @@ mod tests {
                 ("tokens.txt", "<unk> 0\n<|zh|> 1\n"),
             ],
         );
-        let found = inspect(&dir, None).unwrap();
+        let found = inspect(&dir).unwrap();
         assert_eq!(ids(&found), ["sense-voice"]);
         assert!(found.families[0].needs_vad);
     }
@@ -848,7 +805,9 @@ mod tests {
     #[test]
     fn a_markerless_flat_model_asks_for_the_family() {
         let dir = dir_with("flat", &[("model.onnx", "x"), ("tokens.txt", "<unk> 0\n")]);
-        let found = inspect(&dir, None).unwrap();
+        let found = inspect(&dir).unwrap();
+        // The first is preselected, and loading a Paraformer folder as
+        // SenseVoice ends the process, so SenseVoice goes last.
         assert_eq!(ids(&found), ["paraformer", "firered-ctc", "sense-voice"]);
     }
 
@@ -863,7 +822,7 @@ mod tests {
 
     #[test]
     fn transducers_default_by_folder_name() {
-        let found = inspect(&transducer("transducer", "m-streaming"), None).unwrap();
+        let found = inspect(&transducer("transducer", "m-streaming")).unwrap();
         assert_eq!(ids(&found), ["streaming-transducer", "transducer"]);
         assert!(found.families[0].streaming);
     }
@@ -871,7 +830,7 @@ mod tests {
     #[test]
     fn only_the_folder_name_says_streaming() {
         // "streaming" in a parent folder says nothing about this model.
-        let found = inspect(&transducer("streaming-models", "zipformer-en"), None).unwrap();
+        let found = inspect(&transducer("streaming-models", "zipformer-en")).unwrap();
         assert_eq!(ids(&found)[0], "transducer");
     }
 
@@ -879,7 +838,7 @@ mod tests {
     #[test]
     fn an_unknown_folder_names_the_problem() {
         let dir = dir_with("unknown", &[("readme.md", "hi")]);
-        let error = inspect(&dir, None).unwrap_err();
+        let error = inspect(&dir).unwrap_err();
         assert!(!error.to_string().is_empty(), "{error}");
     }
 
@@ -890,6 +849,29 @@ mod tests {
         let bilstm = dir_with("punct-bilstm", &[("model.onnx", "x"), ("bpe.vocab", "x")]);
         assert_eq!(punct_kind(&bilstm).unwrap(), "CNN-BiLSTM (English)");
         assert!(punct_kind(&ct.join("missing")).is_none());
+        assert!(check_punct(&ct).is_ok());
+        assert!(check_punct(&bilstm).is_ok());
+    }
+
+    #[test]
+    fn a_recognition_model_is_not_taken_for_a_punctuation_model() {
+        // `PunctuationConfig::validate` accepts both folders, and loading one
+        // as punctuation exits the process: sherpa-onnx finds no punctuation
+        // metadata in it.
+        for (name, tokens) in [
+            ("sense-voice", "<unk> 0\n<|zh|> 1\n"),
+            ("paraformer", "<unk> 0\n"),
+        ] {
+            let dir = dir_with(
+                &format!("asr-as-punct-{name}"),
+                &[("model.int8.onnx", "x"), ("tokens.txt", tokens)],
+            );
+            let error = check_punct(&dir).unwrap_err();
+            assert!(error.to_string().contains("recognition model"), "{error}");
+            assert!(punct_kind(&dir).is_none());
+        }
+        let empty = dir_with("no-model", &[("readme.md", "hi")]);
+        assert!(check_punct(&empty).is_err());
     }
 
     // Real models, from `~/.cache/speechkit/models` (or SPEECHKIT_MODELS).
@@ -907,7 +889,7 @@ mod tests {
     /// Adds `folder` the way the Voice engine screen does: detect, then
     /// take the most likely family.
     fn add(settings: &mut Settings, folder: &str) -> String {
-        let found = inspect(&models().join(folder), settings.vad_model.as_deref()).unwrap();
+        let found = inspect(&models().join(folder)).unwrap();
         let model = LocalModel {
             id: folder.into(),
             name: found.name,
@@ -924,22 +906,20 @@ mod tests {
     }
 
     fn transcribe(loaded: &LoadedEngine, wav: &Path) -> (String, String) {
-        let audio = speechkit::audio::read_wav_pcm16(wav).unwrap();
-        let outcome = loaded
+        let audio = speechkit::audio::read(wav, speechkit::audio::DecodeLimits::default()).unwrap();
+        let mut outcome = loaded
             .engine
             .transcribe(
                 &audio,
-                speechkit::asr::SessionOptions::default(),
+                speechkit::asr::AsrOptions::default(),
                 Instant::now() + Duration::from_secs(120),
             )
             .unwrap();
-        let segments: Vec<String> = outcome
-            .transcript
-            .segments
-            .iter()
-            .map(|s| s.text.clone())
-            .collect();
-        (join(&segments), loaded.finish_text(&segments))
+        let raw = outcome.text();
+        for segment in &mut outcome.segments {
+            loaded.punctuate(&mut segment.text);
+        }
+        (raw, outcome.text())
     }
 
     #[test]
@@ -983,6 +963,63 @@ mod tests {
             text.contains('。') || text.contains('，'),
             "SenseVoice punctuates: {text}"
         );
+    }
+
+    #[test]
+    #[ignore = "needs sherpa-onnx models"]
+    fn sense_voice_keeps_a_short_pause_in_one_utterance_and_flushes_on_stop() {
+        let mut settings = Settings::default();
+        let id = add(&mut settings, SENSE_VOICE);
+        let dir = &settings.local_models[0].path;
+        let mut audio = speechkit::audio::read(
+            dir.join("test_wavs/zh.wav"),
+            speechkit::audio::DecodeLimits::default(),
+        )
+        .unwrap();
+        // Insert a thinking pause into the same Chinese sentence for both
+        // engines; add no trailing silence, so finish must flush the tail.
+        let middle = audio.samples.len() / 2;
+        let pause = audio.sample_rate.frames_in(Duration::from_millis(650)) as usize;
+        audio
+            .samples
+            .splice(middle..middle, std::iter::repeat_n(0.0, pause));
+        let recognize = |engine: &AsrEngine, audio: &speechkit::AudioBuffer| {
+            engine
+                .transcribe(
+                    audio,
+                    AsrOptions::default(),
+                    Instant::now() + Duration::from_secs(120),
+                )
+                .unwrap()
+        };
+        let original = AsrEngine::new(
+            AsrConfig::offline(dir, settings.vad_model.as_ref().unwrap())
+                .with_family(AsrFamily::SenseVoice)
+                .load()
+                .unwrap(),
+        );
+        let before = recognize(&original, &audio);
+        drop(original);
+        let loaded = build(&id, &settings, &CloudRuntime::owned(1).unwrap()).unwrap();
+        let after = recognize(&loaded.engine, &audio);
+        eprintln!("500 ms: {} segments: {}", before.segments.len(), before.text());
+        eprintln!("1000 ms: {} segments: {}", after.segments.len(), after.text());
+        assert!(before.segments.len() > 1, "the old VAD must split the pause");
+        assert_eq!(after.segments.len(), 1, "the brief pause must stay together");
+        assert!(
+            after.text().ends_with("下午5点。"),
+            "the final words must survive stop: {}",
+            after.text()
+        );
+        assert_eq!(after.text().matches('。').count(), 1, "{}", after.text());
+
+        // A real sentence break still ends an utterance.
+        let extra = audio.sample_rate.frames_in(Duration::from_millis(850)) as usize;
+        audio
+            .samples
+            .splice(middle..middle, std::iter::repeat_n(0.0, extra));
+        let long_pause = recognize(&loaded.engine, &audio);
+        assert_eq!(long_pause.segments.len(), 2, "a 1.5 s pause must still split");
     }
 
     #[test]
@@ -1050,13 +1087,58 @@ mod tests {
     fn a_punctuation_model_loads_and_is_described() {
         let dir = models().join("sherpa-onnx-online-punct-en-2024-08-06");
         check_punct(&dir).unwrap();
+        let punctuation = PunctuationConfig::new(&dir).load().unwrap();
+        let text = punctuation.process("HELLO WORLD HOW ARE YOU").unwrap();
+        assert_ne!(text, "HELLO WORLD HOW ARE YOU", "{text}");
         assert_eq!(punct_kind(&dir).unwrap(), "CNN-BiLSTM (English)");
         assert!(check_punct(&models().join(ZIPFORMER)).is_err());
+        // A recognition model passes `PunctuationConfig::validate`, and loading
+        // it as punctuation exits the process.
+        assert!(check_punct(&models().join(SENSE_VOICE)).is_err());
+
+        // The application must restore dictionary spelling after punctuation
+        // while keeping the original recognizer text for Use raw.
+        let mut settings = Settings {
+            punct_model: Some(dir),
+            ..Settings::default()
+        };
+        settings.dictionary.push(DictionaryEntry {
+            word: "speechkit".into(),
+            sounds_like: vec!["speech kit".into()],
+            ..Default::default()
+        });
+        let id = add(&mut settings, ZIPFORMER);
+        let loaded = build(&id, &settings, &CloudRuntime::owned(1).unwrap()).unwrap();
+        let transcript = speechkit::asr::Transcript::new(
+            vec![speechkit::asr::Segment {
+                utterance: speechkit::asr::UtteranceId(0),
+                text: "speech kit is fast".into(),
+                start: Duration::ZERO,
+                end: Duration::from_secs(1),
+            }],
+            Duration::from_secs(1),
+        );
+        let raw = transcript.text();
+        let text = crate::dictation::finish(&settings, "", Some(&loaded), transcript);
+        let punctuated = punctuation.process("speechkit is fast").unwrap();
+        let expected = dictionary::apply(&settings.dictionary, "", &punctuated);
+        assert_eq!(text, expected);
+        assert!(text.starts_with("speechkit"), "{text}");
+        assert_eq!(raw, "speech kit is fast");
     }
 
     #[test]
-    fn joining_keeps_cjk_tight() {
-        assert_eq!(join(&["你好，".into(), "世界".into()]), "你好，世界");
-        assert_eq!(join(&["Hello.".into(), "World".into()]), "Hello. World");
+    #[ignore = "needs sherpa-onnx models"]
+    fn a_saved_punctuation_folder_that_is_a_recognition_model_is_skipped_not_loaded() {
+        // A saved setting can name any folder. Loading this one as punctuation
+        // would end the process, here the test run.
+        let mut settings = Settings {
+            punct_model: Some(models().join(SENSE_VOICE)),
+            ..Settings::default()
+        };
+        let id = add(&mut settings, ZIPFORMER);
+        let loaded = build(&id, &settings, &CloudRuntime::owned(1).unwrap()).unwrap();
+        assert!(loaded.punct.is_none());
+        assert_eq!(loaded.info.punctuation, "none");
     }
 }

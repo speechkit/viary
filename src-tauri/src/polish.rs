@@ -61,17 +61,49 @@ pub struct Request {
 ///
 /// What the user must set up first: a model, or the provider's key.
 pub fn request(settings: &Settings, app: &str) -> Result<Request, String> {
+    request_with_keys(settings, app, keychain::load)
+}
+
+/// A real chat request using the draft configuration and, when supplied, its
+/// unsaved custom key. No settings or Keychain entries are changed.
+pub fn test_connection(settings: &Settings, key: Option<String>) -> Result<(), String> {
+    let key = key
+        .filter(|key| !key.trim().is_empty())
+        .map(|key| Arc::new(Secret::new(key.trim().to_owned())));
+    let mut request = request_with_keys(settings, "", |provider| {
+        if provider == Provider::CustomPolish {
+            key.clone().or_else(|| keychain::load(provider))
+        } else {
+            keychain::load(provider)
+        }
+    })?;
+    request.system =
+        "Rewrite the user message as a short sentence. Reply with the rewritten text only.".into();
+    request
+        .run("Hello, this is a connection test.", TIMEOUT)
+        .map(|_| ())
+}
+
+fn request_with_keys(
+    settings: &Settings,
+    app: &str,
+    load_key: impl Fn(Provider) -> Option<Arc<Secret>>,
+) -> Result<Request, String> {
     let polish = &settings.polish;
     let model = polish.model.trim();
     if model.is_empty() {
         return Err("choose a polish model first".into());
     }
     let need_key = |provider: Provider, name: &str| {
-        keychain::load(provider)
+        load_key(provider)
             .ok_or_else(|| format!("add your {name} API key under Voice engine first"))
     };
     let (base, key) = match polish.provider {
         PolishProvider::Local => (polish.base_url.trim().to_owned(), None),
+        PolishProvider::Custom => (
+            polish.base_url.trim().to_owned(),
+            load_key(Provider::CustomPolish),
+        ),
         PolishProvider::OpenAi => (
             settings.openai.base_url.trim().to_owned(),
             Some(need_key(Provider::OpenAi, "OpenAI")?),
@@ -87,8 +119,16 @@ pub fn request(settings: &Settings, app: &str) -> Result<Request, String> {
             Some(need_key(Provider::DashScope, "DashScope")?),
         ),
     };
-    if !base.starts_with("http://") && !base.starts_with("https://") {
+    let url =
+        tauri::Url::parse(&base).map_err(|_| "enter a valid polish server base URL".to_owned())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err("the polish server URL must start with http:// or https://".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("use the API key field instead of credentials in the server URL".into());
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("the polish base URL must not contain a query or fragment".into());
     }
     Ok(Request {
         url: format!("{}/chat/completions", base.trim_end_matches('/')),
@@ -208,7 +248,9 @@ impl Request {
 /// About how many Latin letters `text` takes to say: a CJK character
 /// carries a word or so, and its English translation some 4 letters.
 fn length(text: &str) -> usize {
-    text.chars().map(|c| if dictionary::is_cjk(c) { 4 } else { 1 }).sum()
+    text.chars()
+        .map(|c| if dictionary::is_cjk(c) { 4 } else { 1 })
+        .sum()
 }
 
 /// The model's rewrite, without a reasoning block, if it looks like one: not
@@ -305,6 +347,47 @@ mod tests {
         assert!(super::request(&s, "Mail").is_err());
     }
 
+    #[test]
+    fn custom_credentials_are_independent_and_optional() {
+        let mut s = settings();
+        s.polish.provider = PolishProvider::Custom;
+        s.polish.base_url = "https://gateway.example/compatible/v1/".into();
+        s.openai.base_url = "https://voice.example/v1".into();
+        let build = |key: Option<Arc<Secret>>| {
+            request_with_keys(&s, "Mail", |provider| {
+                assert_eq!(provider, Provider::CustomPolish);
+                key.clone()
+            })
+            .unwrap()
+        };
+        let anonymous = build(None);
+        assert_eq!(
+            anonymous.url,
+            "https://gateway.example/compatible/v1/chat/completions"
+        );
+        assert!(anonymous.key.is_none());
+        let authenticated = build(Some(Arc::new(Secret::new("custom-test-key"))));
+        assert_eq!(authenticated.key.unwrap().expose(), "custom-test-key");
+    }
+
+    #[test]
+    fn custom_rejects_invalid_base_urls() {
+        let mut s = settings();
+        s.polish.provider = PolishProvider::Custom;
+        for url in [
+            "",
+            "https://",
+            "server.example/v1",
+            "ftp://server.example/v1",
+            "https://user:password@server.example/v1",
+            "https://server.example/v1?key=secret",
+            "https://server.example/v1#fragment",
+        ] {
+            s.polish.base_url = url.into();
+            assert!(request_with_keys(&s, "", |_| None).is_err(), "{url}");
+        }
+    }
+
     /// Serves one request on a local port with `reply`, and returns the
     /// server's URL and the request it received.
     fn fake_server(status: &str, reply: &str) -> (String, std::thread::JoinHandle<String>) {
@@ -370,6 +453,61 @@ mod tests {
                 .unwrap()
                 .contains("into Slack")
         );
+    }
+
+    #[test]
+    fn custom_requests_send_only_the_custom_bearer_key() {
+        let (url, served) = fake_server("200 OK", r#"{"choices":[{"message":{"content":"Hi."}}]}"#);
+        let mut s = settings();
+        s.polish.provider = PolishProvider::Custom;
+        s.polish.base_url = url;
+        let request = request_with_keys(&s, "", |provider| {
+            assert_eq!(provider, Provider::CustomPolish);
+            Some(Arc::new(Secret::new("custom-test-key")))
+        })
+        .unwrap();
+        assert_eq!(request.run("hi", TIMEOUT).unwrap(), "Hi.");
+        let sent = served.join().unwrap();
+        assert!(
+            sent.to_ascii_lowercase()
+                .contains("authorization: bearer custom-test-key\r\n")
+        );
+    }
+
+    #[test]
+    fn connection_test_uses_the_unsaved_custom_key_and_model() {
+        let (url, served) = fake_server(
+            "200 OK",
+            r#"{"choices":[{"message":{"content":"Hello, this is a connection test."}}]}"#,
+        );
+        let mut s = settings();
+        s.polish.provider = PolishProvider::Custom;
+        s.polish.base_url = url;
+        s.polish.model = "draft-model".into();
+        test_connection(&s, Some(" draft-test-key ".into())).unwrap();
+        let sent = served.join().unwrap();
+        assert!(
+            sent.to_ascii_lowercase()
+                .contains("authorization: bearer draft-test-key\r\n")
+        );
+        let body: Value = serde_json::from_str(&sent[sent.find('{').unwrap()..]).unwrap();
+        assert_eq!(body["model"], "draft-model");
+        assert_eq!(
+            body["messages"][1]["content"],
+            "Hello, this is a connection test."
+        );
+    }
+
+    #[test]
+    fn custom_server_can_run_without_authentication() {
+        let (url, served) = fake_server("200 OK", r#"{"choices":[{"message":{"content":"Hi."}}]}"#);
+        let mut s = settings();
+        s.polish.provider = PolishProvider::Custom;
+        s.polish.base_url = url;
+        let request = request_with_keys(&s, "", |_| None).unwrap();
+        assert_eq!(request.run("hi", TIMEOUT).unwrap(), "Hi.");
+        let sent = served.join().unwrap();
+        assert!(!sent.to_ascii_lowercase().contains("authorization"));
     }
 
     #[test]

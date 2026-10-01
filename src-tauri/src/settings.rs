@@ -31,7 +31,7 @@ pub enum Language {
 }
 
 impl Language {
-    /// The code for `SessionOptions::language`, or `None` for automatic.
+    /// The code for `AsrOptions::language`, or `None` for automatic.
     pub fn code(self) -> Option<&'static str> {
         match self {
             Self::Auto => None,
@@ -116,7 +116,7 @@ pub enum WordKind {
     Person,
 }
 
-/// How strongly a hotword engine favors a word.
+/// Prompt priority. Transducer hotwords use the backend's default boost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum Boost {
@@ -187,6 +187,8 @@ pub enum PolishProvider {
     /// A server on this Mac, such as Ollama or LM Studio.
     #[default]
     Local,
+    /// Any OpenAI-compatible server, with its own optional key.
+    Custom,
     /// OpenAI, with the key and base URL of the OpenAI engine.
     OpenAi,
     /// DashScope's compatible mode, with its key and region.
@@ -207,7 +209,7 @@ pub struct PolishSettings {
     /// The language to translate into, by its English name.
     pub translate_to: String,
     pub provider: PolishProvider,
-    /// The local server's OpenAI-compatible URL.
+    /// The local or custom server's OpenAI-compatible base URL.
     pub base_url: String,
     /// Empty until the user names one: Viary never picks a model.
     pub model: String,
@@ -306,7 +308,7 @@ pub struct Settings {
     /// `cpu` or `coreml`.
     pub provider: String,
     pub threads: usize,
-    /// A name from `speechkit::io::input_devices`, or the default device.
+    /// A name from `speechkit::io::Microphone::list`, or the default device.
     pub microphone: Option<String>,
     pub language: Language,
     pub hotkey: Hotkey,
@@ -422,6 +424,24 @@ mod tests {
         assert!(saved.patched(unknown.as_object().unwrap().clone()).is_err());
         let wrong = serde_json::json!({ "enabled": "yes" });
         assert!(saved.patched(wrong.as_object().unwrap().clone()).is_err());
+    }
+
+    #[test]
+    fn custom_polish_settings_round_trip_without_credentials() {
+        let old: PolishSettings = serde_json::from_str(r#"{"model":"local-model"}"#).unwrap();
+        assert_eq!(old.provider, PolishProvider::Local);
+        let patch = serde_json::json!({
+            "provider": "custom", "baseUrl": " https://gateway.example/v1/ ", "model": " custom-model "
+        });
+        let custom = old.patched(patch.as_object().unwrap().clone()).unwrap();
+        assert_eq!(custom.provider, PolishProvider::Custom);
+        assert_eq!(custom.base_url, "https://gateway.example/v1/");
+        let encoded = serde_json::to_value(&custom).unwrap();
+        assert!(encoded.get("apiKey").is_none());
+        assert_eq!(
+            serde_json::from_value::<PolishSettings>(encoded).unwrap(),
+            custom
+        );
     }
 
     #[test]

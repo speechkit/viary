@@ -62,7 +62,7 @@ function Sidebar({ page, go, s }: { page: Page; go: (p: Page) => void; s: Snapsh
         <span className="inline-flex size-[30px] items-center justify-center rounded-[7px] bg-ink">
           <Mark size={19} />
         </span>
-        <span className="-mt-[3px] font-serif text-2xl leading-none font-medium tracking-[-0.02em]">viary</span>
+        <span className="font-serif text-2xl leading-none font-medium tracking-[-0.02em]">Viary</span>
       </div>
       {NAV.map((item) => {
         const current = item.id === page;

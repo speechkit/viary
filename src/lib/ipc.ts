@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 
 export type Hotkey = "fn" | "rightOption" | "rightCommand";
 export type Language = "auto" | "en" | "zh";
-export type Provider = "openAi" | "dashScope";
+export type Provider = "openAi" | "dashScope" | "customPolish";
 
 export interface LocalModel {
   id: string;
@@ -45,7 +45,7 @@ export interface DictionaryEntry {
 export const MAX_WORDS = 256;
 
 export type Tone = "formal" | "casual" | "asSpoken" | "literal";
-export type PolishProvider = "local" | "openAi" | "dashScope";
+export type PolishProvider = "local" | "custom" | "openAi" | "dashScope";
 
 export interface PolishSettings {
   enabled: boolean;
@@ -58,7 +58,7 @@ export interface PolishSettings {
   translateTo: string;
   /** Where the language model runs: an OpenAI-compatible server. */
   provider: PolishProvider;
-  /** For a local server, such as Ollama or LM Studio. */
+  /** The base URL of a local or custom OpenAI-compatible server. */
   baseUrl: string;
   /** Empty until the user names one: Viary never picks a model. */
   model: string;
@@ -137,7 +137,7 @@ export type PillAction = "undo" | "useRaw" | "retry" | "switchEngine" | "dismiss
 export interface Snapshot {
   settings: Settings;
   engine: EngineStatus;
-  keys: { openAi: boolean; dashScope: boolean };
+  keys: { openAi: boolean; dashScope: boolean; customPolish: boolean };
   permissions: { accessibility: boolean; inputMonitoring: boolean };
   hotkeyActive: boolean;
   hotkeyName: string;
@@ -211,6 +211,8 @@ export const api = {
   updatePolish: (patch: Partial<Omit<PolishSettings, "tones">>) => invoke<void>("update_polish", { patch }),
   /** Sets an app's polish tone, or takes the app off the list with `null`. */
   setAppTone: (app: string, tone: Tone | null) => invoke<void>("set_app_tone", { target: app, tone }),
+  testPolishConnection: (patch: Pick<PolishSettings, "provider" | "baseUrl" | "model">, key: string | null) =>
+    invoke<void>("test_polish_connection", { patch, key }),
   polishPreview: (app: string, text: string) => invoke<string>("polish_preview", { target: app, text }),
   history,
   deleteHistory: (id: string) => invoke<void>("history_delete", { id }),

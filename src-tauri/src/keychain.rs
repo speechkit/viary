@@ -1,8 +1,8 @@
 //! Cloud API keys in the macOS Keychain.
 //!
-//! Keys are written once from the Voice engine screen and read only when an
-//! engine is built. They never go back to the web view: the UI learns only
-//! whether a key is stored.
+//! Keys are written from the Voice engine or Polish screens and read when
+//! an engine or polish request is built. They never go back to the web view:
+//! the UI learns only whether a key is stored.
 
 use std::sync::Arc;
 
@@ -16,6 +16,8 @@ const SERVICE: &str = "app.viary.api-key";
 pub enum Provider {
     OpenAi,
     DashScope,
+    /// Independent credentials for a custom polish server.
+    CustomPolish,
 }
 
 impl Provider {
@@ -23,6 +25,7 @@ impl Provider {
         match self {
             Self::OpenAi => "openai",
             Self::DashScope => "dashscope",
+            Self::CustomPolish => "custom-polish",
         }
     }
 }

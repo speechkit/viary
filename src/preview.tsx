@@ -12,7 +12,7 @@ import "./styles.css";
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { createRoot } from "react-dom/client";
-import type { DictionaryEntry, HistoryItem, PillView, PolishSettings, Snapshot, Tone } from "./lib/ipc";
+import type { DictionaryEntry, HistoryItem, PillView, PolishSettings, Provider, Snapshot, Tone } from "./lib/ipc";
 
 const params = new URLSearchParams(location.search);
 const label = params.get("w") ?? "main";
@@ -71,7 +71,7 @@ const snapshot: Snapshot = {
     failed: null,
     error: null,
   },
-  keys: { openAi: true, dashScope: false },
+  keys: { openAi: true, dashScope: false, customPolish: false },
   permissions: { accessibility: true, inputMonitoring: true },
   hotkeyActive: true,
   hotkeyName: "fn",
@@ -110,6 +110,15 @@ mockIPC(
     if (cmd === "dictionary_remove") {
       snapshot.settings.dictionary = snapshot.settings.dictionary.filter((w) => w.id !== a.id);
       changed();
+      return null;
+    }
+    if (cmd === "save_api_key" || cmd === "delete_api_key") {
+      snapshot.keys[a.provider as Provider] = cmd === "save_api_key";
+      changed();
+      return null;
+    }
+    if (cmd === "test_polish_connection") {
+      await new Promise((r) => setTimeout(r, 700));
       return null;
     }
     if (cmd === "update_polish") {

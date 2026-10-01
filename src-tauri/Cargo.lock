@@ -3944,9 +3944,9 @@ dependencies = [
 
 [[package]]
 name = "speechkit"
-version = "0.3.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "174a48b587d177a349ddea2ef244bfad92e418c8e865d18893657a9ec9e46c88"
+checksum = "2b3c7153cb0b57ba119cac5bf42b48ea3590b54b7a8f1c17b7a0ff28720b1ecb"
 dependencies = [
  "base64 0.22.1",
  "cpal",

@@ -2,8 +2,8 @@
 // what you meant, after recognition and before insertion, in a tone set
 // per app.
 
-import { useState } from "react";
-import { btn, btnPrimary, ErrorBanner, Field, input, Select, Switch, useDraft } from "../components/Controls";
+import { useEffect, useState } from "react";
+import { btn, btnDanger, btnPrimary, ErrorBanner, Field, input, Select, Switch, useDraft } from "../components/Controls";
 import { Icon } from "../components/Icons";
 import {
   api,
@@ -38,6 +38,7 @@ const PROVIDERS: { value: PolishProvider; label: string }[] = [
   { value: "local", label: "Local server" },
   { value: "openAi", label: "OpenAI" },
   { value: "dashScope", label: "DashScope" },
+  { value: "custom", label: "Custom" },
 ];
 
 const SAMPLE =
@@ -87,65 +88,168 @@ function Rule({
   );
 }
 
+/** Describe the actual destination, including remote URLs in Local mode. */
+function destination(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    if (!["http:", "https:"].includes(url.protocol)) return "Enter an HTTP or HTTPS base URL.";
+    const host = url.hostname.toLowerCase();
+    const local = host === "localhost" || host === "localhost." || host === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(host);
+    return local
+      ? "Transcripts are sent to a local server on this Mac."
+      : `Transcripts are sent to ${url.host}. Audio is not sent for polishing.`;
+  } catch {
+    return "Enter a valid server base URL.";
+  }
+}
+
 /** Where the language model runs, and which one. */
 function ModelCard({ s, onError }: { s: Snapshot; onError: (e: string) => void }) {
   const saved = s.settings.polish;
   const [draft, setDraft, dirty] = useDraft({ provider: saved.provider, baseUrl: saved.baseUrl, model: saved.model });
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState<"save" | "test" | "remove" | null>(null);
+  const [connection, setConnection] = useState<{ text: string; error: boolean } | null>(null);
+  const custom = draft.provider === "custom";
+  const editableUrl = custom || draft.provider === "local";
+  const keyDirty = custom && !!key.trim();
+  const configured = !!draft.model.trim() && (!editableUrl || !!draft.baseUrl.trim());
+  const fingerprint = JSON.stringify([draft, key, s.keys, s.settings.openai.baseUrl, s.settings.dashscope.region]);
+  useEffect(() => setConnection(null), [fingerprint]);
+
   let note: { text: string; warn: boolean };
-  if (draft.provider === "local") {
-    note = { text: "An OpenAI-compatible server on this Mac, such as Ollama or LM Studio. Nothing leaves it.", warn: false };
+  if (editableUrl) {
+    note = {
+      text: `${custom ? "Connect to any OpenAI-compatible chat API. " : ""}${destination(draft.baseUrl)}`,
+      warn: false,
+    };
   } else if (draft.provider === "openAi") {
     note = s.keys.openAi
-      ? { text: "Uses your OpenAI key and base URL from Voice engine. Transcripts are sent to OpenAI.", warn: false }
+      ? { text: `Uses your OpenAI key and base URL from Voice engine. ${destination(s.settings.openai.baseUrl)}`, warn: false }
       : { text: "Add an OpenAI API key under Voice engine first.", warn: true };
   } else {
     note = s.keys.dashScope
       ? { text: "Uses your DashScope key and region from Voice engine. Transcripts are sent to DashScope.", warn: false }
       : { text: "Add a DashScope API key under Voice engine first.", warn: true };
   }
+
+  const save = async () => {
+    onError("");
+    setBusy("save");
+    try {
+      if (keyDirty) {
+        await api.saveApiKey("customPolish", key.trim());
+        setKey("");
+      }
+      await api.updatePolish({ ...draft, baseUrl: draft.baseUrl.trim(), model: draft.model.trim() });
+    } catch (e) {
+      onError(errorText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const test = async () => {
+    setConnection(null);
+    setBusy("test");
+    try {
+      await api.testPolishConnection(draft, keyDirty ? key.trim() : null);
+      setConnection({ text: "Connected. The model returned a response.", error: false });
+    } catch (e) {
+      setConnection({ text: errorText(e), error: true });
+    } finally {
+      setBusy(null);
+    }
+  };
+  const removeKey = async () => {
+    onError("");
+    setBusy("remove");
+    try {
+      await api.deleteApiKey("customPolish");
+      setKey("");
+    } catch (e) {
+      onError(errorText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
-    <div className="flex flex-col gap-3 rounded-[14px] border border-line bg-white px-5 py-4">
-      <div className="flex items-center gap-3">
-        <div className="flex min-w-0 grow flex-col gap-0.5">
-          <span className="text-sm font-medium">Polish model</span>
-          <span className={`text-[13px] leading-[1.45] ${note.warn ? "text-rust" : "text-muted"}`}>{note.text}</span>
+    <div className="rounded-[14px] border border-line bg-white px-5 py-4">
+      <fieldset disabled={!!busy} className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
+        <div className="flex flex-wrap items-start gap-3">
+          <div className="flex min-w-[160px] grow basis-[180px] flex-col gap-0.5">
+            <span className="text-sm font-medium">Polish model</span>
+            <span className={`text-[13px] leading-[1.45] ${note.warn ? "text-rust" : "text-muted"}`}>{note.text}</span>
+          </div>
+          <Select
+            label="Polish model provider"
+            value={draft.provider}
+            options={PROVIDERS}
+            disabled={!!busy}
+            onChange={(provider) => {
+              setDraft({ ...draft, provider });
+              setKey("");
+            }}
+          />
         </div>
-        <Select
-          label="Polish model provider"
-          value={draft.provider}
-          options={PROVIDERS}
-          onChange={(provider) => setDraft({ ...draft, provider })}
-        />
-      </div>
-      <Field label="Model">
-        <input
-          className={input}
-          spellCheck={false}
-          placeholder={draft.provider === "local" ? "The model name, as the server lists it" : "The chat model to use"}
-          value={draft.model}
-          onChange={(e) => setDraft({ ...draft, model: e.target.value })}
-        />
-      </Field>
-      {draft.provider === "local" && (
-        <Field label="Server URL">
+        {editableUrl && (
+          <>
+            <Field label="Base URL">
+              <input
+                className={`${input} min-w-0 w-full`}
+                spellCheck={false}
+                placeholder="https://your-server.example/v1"
+                value={draft.baseUrl}
+                onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })}
+              />
+            </Field>
+            <span className="text-xs leading-[1.45] text-faint">Enter the API base URL, including /v1 if required. For Ollama: http://localhost:11434/v1.</span>
+          </>
+        )}
+        {custom && (
+          <>
+            <Field label="API Key">
+              <input
+                type="password"
+                className={`${input} min-w-0 w-full`}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder={s.keys.customPolish ? "Enter a new key to replace the stored key" : "Optional for servers without authentication"}
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+              />
+            </Field>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
+              <span className="grow">{s.keys.customPolish ? "API key stored in Keychain. Leave blank to keep it." : "Saved keys are stored in the macOS Keychain."}</span>
+              {s.keys.customPolish && (
+                <button type="button" className={btnDanger} onClick={removeKey}>Remove key</button>
+              )}
+            </div>
+          </>
+        )}
+        <Field label="Model">
           <input
-            className={input}
+            className={`${input} min-w-0 w-full`}
             spellCheck={false}
-            value={draft.baseUrl}
-            onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })}
+            placeholder="The model ID, as the server lists it"
+            value={draft.model}
+            onChange={(e) => setDraft({ ...draft, model: e.target.value })}
           />
         </Field>
-      )}
-      <div className="flex justify-end">
-        <button
-          type="button"
-          className={btnPrimary}
-          disabled={!dirty}
-          onClick={() => api.updatePolish({ ...draft, model: draft.model.trim() }).catch((e) => onError(errorText(e)))}
-        >
-          Save
-        </button>
-      </div>
+        {connection && (
+          <span role={connection.error ? "alert" : "status"} className={`break-words text-[13px] ${connection.error ? "text-rust" : "text-teal-ink"}`}>
+            {connection.text}
+          </span>
+        )}
+        <div className="flex flex-wrap justify-end gap-2">
+          <button type="button" className={btn} disabled={!configured || note.warn} onClick={test}>
+            {busy === "test" ? "Testing…" : "Test connection"}
+          </button>
+          <button type="button" className={btnPrimary} disabled={!dirty && !keyDirty} onClick={save}>
+            {busy === "save" ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </fieldset>
     </div>
   );
 }

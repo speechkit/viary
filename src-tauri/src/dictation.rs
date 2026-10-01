@@ -3,7 +3,7 @@
 //! and offer Retry or another engine.
 //!
 //! One thread owns the state and handles [`Msg`]s one at a time. Slow work
-//! (stopping the microphone, finishing a session) runs on worker threads
+//! (finishing recognition and polishing text) runs on worker threads
 //! that report back with a message carrying the dictation's token, so a
 //! late report for an abandoned dictation is ignored.
 
@@ -16,11 +16,10 @@ use std::{
 };
 
 use serde::Serialize;
-use std::collections::BTreeMap;
 
 use speechkit::{
     AudioBuffer, SpeechError,
-    asr::{AsrSession, Transcript, Update, UtteranceId},
+    asr::Transcript,
 };
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -37,7 +36,7 @@ use crate::{
     },
     polish,
     settings::{Hotkey, Settings},
-    tap::{Engine, EngineSlot, PumpEvent, Recording},
+    recording::Recording,
     ui::{self, TrayState},
 };
 
@@ -124,8 +123,6 @@ pub enum PillAction {
 pub enum Msg {
     Hotkey(HotkeyEvent),
     Pill(PillAction),
-    /// The engine session of dictation `token` opened, or failed to.
-    Started(u64, Result<Arc<AsrSession>, Arc<SpeechError>>),
     /// Recognition for `token` ended.
     Finished(u64, Transcribed),
     /// The polish model rewrote the text of `token`, or gave up.
@@ -138,7 +135,7 @@ pub enum Msg {
 
 /// A recognition result.
 pub struct Transcribed {
-    result: Result<Vec<String>, SpeechError>,
+    result: Result<Transcript, SpeechError>,
     audio: Arc<AudioBuffer>,
     engine: Option<Arc<LoadedEngine>>,
 }
@@ -172,7 +169,6 @@ struct Job {
 
 struct Listening {
     recording: Recording,
-    slot: EngineSlot,
     engine: Arc<LoadedEngine>,
     started: Instant,
     started_ms: u64,
@@ -247,9 +243,6 @@ impl Controller {
                 Msg::Hotkey(HotkeyEvent::Up) => self.key_up(),
                 Msg::Hotkey(HotkeyEvent::OtherKey) => self.other_key(),
                 Msg::Pill(action) => self.pill(action),
-                Msg::Started(token, started) if token == self.token => {
-                    self.stream_partials(token, started)
-                }
                 Msg::Finished(token, done) if token == self.token => self.finished(done),
                 Msg::Polished(token, polished) if token == self.token => self.polished(polished),
                 Msg::Switched(token, id, outcome) if token == self.token => {
@@ -323,44 +316,35 @@ impl Controller {
                 return;
             }
         };
-        let rate = microphone.sample_rate();
-        let slot = EngineSlot::new();
+        let options = engine.session_options(&settings, &target.name);
         let app = self.app.clone();
-        let recording = Recording::start(&microphone, slot.clone(), move |event| match event {
-            PumpEvent::Level(level) => {
+        let recording = match Recording::start(
+            &microphone,
+            &engine.engine,
+            options,
+            move |level, text| {
                 let _ = app.emit_to("pill", "pill-level", level);
-            }
-            PumpEvent::EngineStopped(error) => {
-                tracing::warn!(%error, "the engine stopped taking audio; still recording");
-            }
-        });
-        let recording = match recording {
+                if let Some(text) = text {
+                    let _ = app.emit_to("pill", "pill-partial", (token, text));
+                }
+            },
+        ) {
             Ok(recording) => recording,
             Err(error) => {
                 tracing::warn!(error = %describe(&error), "cannot start recording");
-                self.hint("Microphone unavailable");
+                // speechkit names the backend of a device that would not start.
+                let device = matches!(
+                    &error,
+                    SpeechError::Backend { backend, .. } if backend == "microphone"
+                );
+                self.hint(if device {
+                    "Microphone unavailable"
+                } else {
+                    "Cannot start dictation"
+                });
                 return;
             }
         };
-        // Opening a session may connect to a service: never on this thread.
-        let options = engine.session_options(&settings, &target.name);
-        let (session_engine, mailbox, session_slot) =
-            (engine.clone(), self.mailbox.clone(), slot.clone());
-        std::thread::spawn(move || {
-            let started = session_engine
-                .engine
-                .start(rate, options)
-                .map(Arc::new)
-                .map_err(Arc::new);
-            match &started {
-                Ok(session) => session_slot.set(Engine::Ready(session.clone())),
-                Err(error) => {
-                    tracing::warn!(error = %describe(error.as_ref()), "the engine session did not start");
-                    session_slot.set(Engine::Failed(error.clone()));
-                }
-            }
-            let _ = mailbox.send(Msg::Started(token, started));
-        });
         let started_ms = history::now_ms();
         self.show(PillView::Listening {
             token,
@@ -370,34 +354,11 @@ impl Controller {
         });
         self.phase = Phase::Listening(Box::new(Listening {
             recording,
-            slot,
             engine,
             started: Instant::now(),
             started_ms,
             target,
         }));
-    }
-
-    /// Streams the session's text to the pill while it runs: live words
-    /// for streaming engines, and each phrase as offline ones finish it.
-    fn stream_partials(&self, token: u64, started: Result<Arc<AsrSession>, Arc<SpeechError>>) {
-        let Ok(session) = started else {
-            return; // Still recording; the failure shows on release.
-        };
-        let Ok(mut observer) = session.subscribe() else {
-            return;
-        };
-        let app = self.app.clone();
-        std::thread::spawn(move || {
-            let mut view = LiveText::default();
-            let deadline = Instant::now() + Duration::from_secs(30 * 60);
-            while let Ok(update) = observer.recv_until(deadline) {
-                if !view.apply(update) {
-                    break;
-                }
-                let _ = app.emit_to("pill", "pill-partial", (token, view.text()));
-            }
-        });
     }
 
     fn other_key(&mut self) {
@@ -423,12 +384,12 @@ impl Controller {
         }
         let Listening {
             recording,
-            slot,
             engine,
             started_ms,
             target,
             ..
         } = *listening;
+        recording.stop();
         let token = self.token;
         self.show(PillView::Transcribing {
             label: transcribing_label(&engine.info),
@@ -443,15 +404,9 @@ impl Controller {
         });
         let mailbox = self.mailbox.clone();
         std::thread::spawn(move || {
-            let audio = Arc::new(recording.stop());
-            let result = match slot.settled(Instant::now()) {
-                Engine::Ready(session) => session
-                    .finish(Instant::now() + Duration::from_secs(90))
-                    .map(|outcome| texts(&outcome.transcript))
-                    .map_err(|failure| failure.error),
-                Engine::Failed(error) => Err((*error).clone()),
-                Engine::Starting => Err(SpeechError::DeadlineExceeded),
-            };
+            let (outcome, audio) = recording.finish(Duration::from_secs(90));
+            let audio = Arc::new(audio);
+            let result = outcome.map_err(|failure| failure.error);
             let engine = Some(engine);
             let _ = mailbox.send(Msg::Finished(
                 token,
@@ -474,8 +429,8 @@ impl Controller {
         job.audio = Some(done.audio.clone());
         let info = done.engine.as_ref().map(|e| e.info.clone());
         match done.result {
-            Ok(segments) => {
-                let raw = engines::join(&segments);
+            Ok(transcript) => {
+                let raw = transcript.text();
                 if raw.trim().is_empty() {
                     if job.history_id.is_some() {
                         // A retry that heard nothing: keep the failed entry.
@@ -485,7 +440,7 @@ impl Controller {
                     return;
                 }
                 let settings = self.settings();
-                let text = finish(&settings, &job.target.name, done.engine.as_deref(), &segments);
+                let text = finish(&settings, &job.target.name, done.engine.as_deref(), transcript);
                 if polish::applies(&settings, &job.target.name) {
                     self.polish(job, &settings, text, raw, info);
                 } else {
@@ -807,7 +762,6 @@ impl Controller {
             let result = engine
                 .engine
                 .transcribe(&audio, options, Instant::now() + Duration::from_secs(120))
-                .map(|outcome| texts(&outcome.transcript))
                 .map_err(|failure| failure.error);
             let engine = Some(engine);
             let _ = mailbox.send(Msg::Finished(
@@ -895,57 +849,21 @@ fn deliver(app: &AppHandle, text: &str, target: &TargetApp) -> Delivery {
     Delivery::Pasted
 }
 
-/// The text to insert for `segments` dictated into `app`: dictionary
-/// replacements, the engine's punctuation model if it has one, then the
-/// dictionary again, to restore its spellings after punctuation.
-pub fn finish(settings: &Settings, app: &str, engine: Option<&LoadedEngine>, segments: &[String]) -> String {
-    let fixed: Vec<String> = segments
-        .iter()
-        .map(|s| dictionary::apply(&settings.dictionary, app, s))
-        .collect();
-    let text = engine.map_or_else(|| engines::join(&fixed), |e| e.finish_text(&fixed));
-    dictionary::apply(&settings.dictionary, app, &text)
-}
-
-pub fn texts(transcript: &Transcript) -> Vec<String> {
-    transcript.segments.iter().map(|s| s.text.clone()).collect()
-}
-
-/// The text an observer has seen so far: committed segments, then the
-/// pending text of unfinished utterances.
-#[derive(Default)]
-struct LiveText {
-    committed: Vec<String>,
-    partials: BTreeMap<UtteranceId, String>,
-}
-
-impl LiveText {
-    /// Applies `update`, and returns whether more may follow.
-    fn apply(&mut self, update: Update) -> bool {
-        match update {
-            Update::Partial(partial) => {
-                self.partials.insert(partial.utterance, partial.text);
-            }
-            Update::Segment(segment) => {
-                self.partials.remove(&segment.utterance);
-                self.committed.push(segment.text);
-            }
-            Update::Closed(_) => return false,
-            // Kinds added in later versions change nothing shown.
-            _ => {}
+/// Applies per-app dictionary replacements, optional punctuation, then
+/// restores dictionary spellings. The caller keeps the original transcript.
+pub fn finish(
+    settings: &Settings,
+    app: &str,
+    engine: Option<&LoadedEngine>,
+    mut transcript: Transcript,
+) -> String {
+    for segment in &mut transcript.segments {
+        segment.text = dictionary::apply(&settings.dictionary, app, &segment.text);
+        if let Some(engine) = engine {
+            engine.punctuate(&mut segment.text);
         }
-        true
     }
-
-    fn text(&self) -> String {
-        let parts: Vec<String> = self
-            .committed
-            .iter()
-            .chain(self.partials.values())
-            .cloned()
-            .collect();
-        engines::join(&parts)
-    }
+    dictionary::apply(&settings.dictionary, app, &transcript.text())
 }
 
 fn context(target: &TargetApp, info: &EngineInfo) -> String {
@@ -970,22 +888,22 @@ fn transcribing_label(info: &EngineInfo) -> String {
 /// The pill's message for a failure, and whether Retry may help.
 fn failure_message(error: &SpeechError, info: Option<&EngineInfo>) -> (String, bool) {
     let cloud = info.is_some_and(|i| !i.on_device);
-    match error {
-        SpeechError::Backend {
-            retryable: true, ..
-        } if cloud => ("Connection lost · audio kept".into(), true),
-        SpeechError::Backend {
-            retryable: true, ..
-        } => ("Engine stopped · audio kept".into(), true),
-        SpeechError::DeadlineExceeded if cloud => ("No response · audio kept".into(), true),
-        SpeechError::DeadlineExceeded => ("Timed out · audio kept".into(), true),
-        SpeechError::Capacity => ("Engine busy · audio kept".into(), true),
-        SpeechError::InvalidModel(_) => ("Engine unavailable · audio kept".into(), false),
+    // speechkit classifies backend failures and capacity. Viary also offers
+    // Retry after a timeout because it retains the complete recording.
+    let retryable = error.retryable() || matches!(error, SpeechError::DeadlineExceeded);
+    let message = match error {
+        SpeechError::Backend { .. } if retryable && cloud => "Connection lost · audio kept",
+        SpeechError::Backend { .. } if retryable => "Engine stopped · audio kept",
+        SpeechError::DeadlineExceeded if cloud => "No response · audio kept",
+        SpeechError::DeadlineExceeded => "Timed out · audio kept",
+        SpeechError::Capacity => "Engine busy · audio kept",
+        SpeechError::InvalidModel(_) => "Engine unavailable · audio kept",
         SpeechError::InvalidInput(_) | SpeechError::Unsupported(_) => {
-            ("Engine not ready · audio kept".into(), false)
+            "Engine not ready · audio kept"
         }
-        _ => ("Recognition failed · audio kept".into(), false),
-    }
+        _ => "Recognition failed · audio kept",
+    };
+    (message.into(), retryable)
 }
 
 fn cloud_ready(settings: &Settings, id: &str) -> bool {
@@ -1057,6 +975,73 @@ mod tests {
     use super::*;
     use crate::settings::LocalModel;
 
+    fn transcript(parts: &[&str]) -> Transcript {
+        use speechkit::asr::{Segment, UtteranceId};
+        Transcript::new(
+            parts
+                .iter()
+                .enumerate()
+                .map(|(i, text)| Segment {
+                    utterance: UtteranceId(i as u64),
+                    text: (*text).into(),
+                    start: Duration::from_secs(i as u64),
+                    end: Duration::from_secs(i as u64 + 1),
+                })
+                .collect(),
+            Duration::from_secs(parts.len() as u64),
+        )
+    }
+
+    #[test]
+    fn processing_keeps_raw_text_and_applies_the_target_apps_dictionary() {
+        let mut settings = Settings::default();
+        settings.dictionary.push(crate::settings::DictionaryEntry {
+            word: "Viary".into(),
+            sounds_like: vec!["hello".into()],
+            apps: vec!["Slack".into()],
+            ..Default::default()
+        });
+        let transcript = transcript(&["HELLO", "world."]);
+        assert_eq!(
+            finish(&settings, "Slack", None, transcript.clone()),
+            "Viary world."
+        );
+        assert_eq!(
+            finish(&settings, "Mail", None, transcript.clone()),
+            "HELLO world."
+        );
+        assert_eq!(transcript.text(), "HELLO world.");
+    }
+
+    #[test]
+    fn a_cjk_mishearing_needs_an_alias_and_preserves_the_raw_transcript() {
+        let mut settings = Settings::default();
+        settings.dictionary.push(crate::settings::DictionaryEntry {
+            word: "通义千问".into(),
+            ..Default::default()
+        });
+        let transcript = transcript(&["通易千问。"]);
+        assert_eq!(
+            finish(&settings, "ChatGPT", None, transcript.clone()),
+            "通易千问。"
+        );
+        settings.dictionary[0].sounds_like.push("通易千问".into());
+        assert_eq!(
+            finish(&settings, "ChatGPT", None, transcript.clone()),
+            "通义千问。"
+        );
+        assert_eq!(transcript.text(), "通易千问。");
+    }
+
+    #[test]
+    fn processing_joins_mixed_language_segments_and_skips_empty_text() {
+        let transcript = transcript(&["你好，", "世界", "", "hello", "world", " "]);
+        assert_eq!(
+            finish(&Settings::default(), "", None, transcript),
+            "你好，世界hello world"
+        );
+    }
+
     fn with_local() -> Settings {
         let mut settings = Settings::default();
         settings.local_models.push(LocalModel {
@@ -1088,29 +1073,6 @@ mod tests {
     }
 
     #[test]
-    fn live_text_shows_segments_then_pending_words() {
-        use speechkit::asr::{Partial, Segment};
-        let mut view = LiveText::default();
-        let partial = |id, text: &str| {
-            Update::Partial(Partial {
-                utterance: UtteranceId(id),
-                text: text.into(),
-            })
-        };
-        assert!(view.apply(partial(0, "hello")));
-        assert!(view.apply(partial(0, "hello wor")));
-        assert_eq!(view.text(), "hello wor");
-        assert!(view.apply(Update::Segment(Segment {
-            utterance: UtteranceId(0),
-            text: "Hello world.".into(),
-            start: Duration::ZERO,
-            end: Duration::ZERO,
-        })));
-        assert!(view.apply(partial(1, "next")));
-        assert_eq!(view.text(), "Hello world. next");
-    }
-
-    #[test]
     fn network_failures_are_retryable() {
         let info = EngineInfo {
             id: OPENAI.into(),
@@ -1130,5 +1092,23 @@ mod tests {
         assert!(retry);
         let (_, retry) = failure_message(&SpeechError::InvalidInput("no key".into()), Some(&info));
         assert!(!retry);
+    }
+
+    #[test]
+    fn retry_policy_keeps_timeouts_retryable_and_rejects_permanent_failures() {
+        for (error, expected) in [
+            (SpeechError::DeadlineExceeded, true),
+            (SpeechError::Capacity, true),
+            (SpeechError::backend("local", false, "broken"), false),
+            (SpeechError::InvalidModel("missing".into()), false),
+            (SpeechError::Unsupported("language".into()), false),
+            (SpeechError::Cancelled, false),
+        ] {
+            assert_eq!(failure_message(&error, None).1, expected, "{error}");
+        }
+        assert_eq!(
+            failure_message(&SpeechError::DeadlineExceeded, None).0,
+            "Timed out · audio kept"
+        );
     }
 }
