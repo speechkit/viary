@@ -30,11 +30,13 @@ The first run opens the main window. Then:
 | Dictionary: hotwords for transducers (with `bpe.vocab`, or Chinese-character models), a prompt for Qwen3-ASR, FunASR-Nano and OpenAI file mode, and "When I say" replacements after recognition for every engine | `src-tauri/src/dictionary.rs` |
 | Polish & tone: an OpenAI-compatible chat model (a local server such as Ollama, a custom endpoint with its own optional Keychain API key, OpenAI, or DashScope) rewrites the text before it is pasted, with a tone per app; if it fails, the text goes in as recognized | `src-tauri/src/polish.rs` |
 
-Recognition results stay as `Transcript` through dictation, Retry, and History; dictionary and punctuation processing update its segment text before `.text()` joins it. The raw text is saved before these edits.
+Recognition results stay as `Transcript` through dictation, Retry, and History. Once recording ends, punctuation runs once over the full dictation, then dictionary replacements apply to the joined text, so they can span recognition segments. The raw text is saved before these edits.
 
-Punctuation: engines that punctuate natively (SenseVoice, cloud) are used as-is. For the others, an optional sherpa-onnx punctuation model runs after the session, so "Use raw" can put back the recognizer's own text.
+Punctuation: an optional sherpa-onnx punctuation model runs once after the session, so "Use raw" can put back the recognizer's own text. Engines without punctuation (Streaming Zipformer) get the model's output for the whole text. Local engines that punctuate natively (SenseVoice, FunASR-Nano) end every recognition segment as a sentence, so a pause mid-thought becomes `。`. With a CT-Transformer (Chinese and English) model, the model reads the whole dictation but decides only what goes at each boundary between segments: nothing, a comma, or a sentence end, which keeps the recognizer's own mark (`？`, `！`). Text inside a segment, including its punctuation, numbers, and addresses, stays as recognized, and English boundaries get ASCII marks. Where the model's output does not match the text (it sometimes drops words), that boundary keeps its native mark. Cloud engines keep their native punctuation. The English-only CNN-BiLSTM model does not replace native punctuation.
 
 SenseVoice waits for 1 second of silence before ending an utterance, keeping brief thinking pauses together to reduce unwanted sentence breaks. Releasing the hold-to-talk key flushes the remaining speech immediately.
+
+For local Chinese paragraph punctuation, download and unpack the [official CT-Transformer int8 model](https://k2-fsa.github.io/sherpa/onnx/punctuation/pretrained_models.html#sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8), then select its folder under Voice engine → Punctuation. The model runs locally, without sending transcripts to a service. One hold-and-release is one completed dictation; silence within it does not trigger final punctuation.
 
 Dictionary priority: Strong words are prioritized when fitting model prompts. speechkit 0.5 accepts transducer hotwords as plain phrases, so each phrase uses the backend's default boost.
 

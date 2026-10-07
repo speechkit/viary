@@ -16,7 +16,7 @@ use std::{
 use serde::Serialize;
 use speechkit::{
     SpeechError,
-    asr::{AsrEngine, AsrOptions, PostProcessor},
+    asr::{AsrEngine, AsrOptions, PostProcessor, Transcript},
     cloud::{
         CloudRuntime, DashScopeAsr, DashScopeAsrConfig, OpenAiRealtime, OpenAiRealtimeConfig,
         OpenAiTranscription, OpenAiTranscriptionConfig,
@@ -293,7 +293,7 @@ pub struct EngineInfo {
 /// An engine ready for dictation.
 pub struct LoadedEngine {
     pub engine: AsrEngine,
-    /// Applied to each committed segment after the session, so the raw
+    /// Applied once to the complete text after the session, so the raw
     /// text stays available for "Use raw".
     pub punct: Option<Arc<Punctuation>>,
     pub info: EngineInfo,
@@ -323,17 +323,155 @@ impl LoadedEngine {
         options
     }
 
-    /// Punctuates one segment, keeping its original text if the model fails.
-    pub fn punctuate(&self, text: &mut String) {
-        if let Some(punct) = &self.punct
-            && !text.trim().is_empty()
-        {
-            match punct.process(text) {
-                Ok(punctuated) => *text = punctuated,
-                Err(error) => tracing::warn!(%error, "punctuation failed; keeping the raw text"),
-            }
+    /// Punctuates the completed dictation, keeping the recognizer's text
+    /// wherever the model fails. `dictionary` gives the words a model that
+    /// punctuates the whole text should see.
+    pub fn punctuate(&self, transcript: &Transcript, dictionary: impl Fn(&str) -> String) -> String {
+        let Some(punct) = &self.punct else {
+            return transcript.text();
+        };
+        if self.engine.capabilities().punctuated {
+            let texts: Vec<_> = transcript.segments.iter().map(|s| s.text.as_str()).collect();
+            punctuate_boundaries(&texts, punct.as_ref())
+        } else {
+            punctuate_text(&dictionary(&transcript.text()), punct.as_ref())
         }
     }
+}
+
+/// Punctuates unpunctuated text, keeping it if the model fails.
+fn punctuate_text(text: &str, punct: &dyn PostProcessor) -> String {
+    if text.trim().is_empty() {
+        return text.to_owned();
+    }
+    match punct.process(text) {
+        Ok(punctuated) if !punctuated.trim().is_empty() => punctuated,
+        Ok(_) => {
+            tracing::warn!("punctuation returned empty text; keeping the raw text");
+            text.to_owned()
+        }
+        Err(error) => {
+            tracing::warn!(%error, "punctuation failed; keeping the raw text");
+            text.to_owned()
+        }
+    }
+}
+
+/// What the model put where one recognition segment meets the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Boundary {
+    Nothing,
+    Comma(char),
+    Stop(char),
+}
+
+/// Native recognizers end every segment as a sentence, so a pause in the
+/// middle of a thought becomes "。". The model reads the whole dictation and
+/// decides only what belongs at each boundary between segments: nothing, a
+/// comma, or a sentence end, which keeps the recognizer's own mark ("？",
+/// "！"). Everything inside a segment stays as recognized. A boundary the
+/// model's output does not line up with keeps its native mark.
+fn punctuate_boundaries(texts: &[&str], punct: &dyn PostProcessor) -> String {
+    let texts: Vec<_> = texts.iter().map(|t| t.trim()).filter(|t| !t.is_empty()).collect();
+    let mut joined = String::new();
+    if texts.len() < 2 {
+        texts.iter().for_each(|t| push_joined(&mut joined, t));
+        return joined;
+    }
+    // The model's input: every segment without its trailing mark (the last
+    // keeps it) and without non-ASCII punctuation, which the model would
+    // not echo back. `ends` counts the content characters before each
+    // boundary.
+    let last = texts.len() - 1;
+    let mut input = String::new();
+    let mut ends = Vec::with_capacity(last);
+    for (i, text) in texts.iter().enumerate() {
+        let body = if i == last { text } else { split_mark(text).0 };
+        let kept: String = body.chars().filter(|&c| model_content(c) || c.is_whitespace()).collect();
+        push_joined(&mut input, kept.trim());
+        if i < last {
+            ends.push(input.chars().filter(|&c| model_content(c)).count());
+        }
+    }
+    let decided = match punct.process(&input) {
+        Ok(output) => boundaries(&input, &output, &ends),
+        Err(error) => {
+            tracing::warn!(%error, "punctuation failed; keeping the raw text");
+            vec![None; ends.len()]
+        }
+    };
+    for (i, text) in texts.iter().enumerate() {
+        let Some(Some(boundary)) = decided.get(i) else {
+            push_joined(&mut joined, text);
+            continue;
+        };
+        let (body, native) = split_mark(text);
+        let ascii = body.ends_with(|c: char| c.is_ascii_alphanumeric())
+            && texts[i + 1].starts_with(|c: char| c.is_ascii_alphanumeric());
+        let mark = match *boundary {
+            Boundary::Nothing => String::new(),
+            Boundary::Comma(_) if ascii => ",".into(),
+            Boundary::Comma(mark) => mark.into(),
+            Boundary::Stop(_) if !native.is_empty() => native.into(),
+            Boundary::Stop(mark) if ascii => if mark == '？' { "?" } else { "." }.into(),
+            Boundary::Stop(mark) => mark.into(),
+        };
+        push_joined(&mut joined, &format!("{body}{mark}"));
+    }
+    joined
+}
+
+/// Reads the model's decision at each boundary, at `ends` content
+/// characters. A decision counts only where the output's content matches
+/// the input on both sides of it: the model sometimes drops words.
+fn boundaries(input: &str, output: &str, ends: &[usize]) -> Vec<Option<Boundary>> {
+    let expected: Vec<_> = input.chars().filter(|&c| model_content(c)).collect();
+    let mut marks = vec![Boundary::Nothing; expected.len() + 1];
+    let mut matched = 0;
+    for c in output.chars().filter(|c| !c.is_whitespace()) {
+        if model_content(c) {
+            if !expected.get(matched).is_some_and(|e| e.eq_ignore_ascii_case(&c)) {
+                break;
+            }
+            matched += 1;
+        } else if matches!(c, '。' | '？' | '！') {
+            marks[matched] = Boundary::Stop(c);
+        } else if marks[matched] == Boundary::Nothing {
+            marks[matched] = Boundary::Comma(if c == '、' { c } else { '，' });
+        }
+    }
+    if ends.iter().any(|&end| end >= matched) {
+        tracing::warn!("punctuation changed the text; keeping some native marks");
+    }
+    ends.iter()
+        .map(|&end| (end < matched).then(|| marks[end]))
+        .collect()
+}
+
+/// Characters the model echoes: ASCII and letters, but not CJK punctuation.
+fn model_content(c: char) -> bool {
+    !c.is_whitespace() && (c.is_ascii() || c.is_alphanumeric())
+}
+
+/// Splits a segment's trailing marks ("。", "?!", "...") from its text.
+fn split_mark(text: &str) -> (&str, &str) {
+    let body = text
+        .trim_end_matches(|c| {
+            matches!(c, '，' | '、' | '。' | '！' | '？' | '；' | '…' | ',' | '.' | '!' | '?' | ';')
+        })
+        .trim_end();
+    (body, text[body.len()..].trim())
+}
+
+/// Appends `text` as `Transcript::text` joins segments: a space only
+/// between ASCII words or after ASCII punctuation.
+fn push_joined(out: &mut String, text: &str) {
+    if out.ends_with(|c: char| c.is_ascii_alphanumeric() || ".!?;:,".contains(c))
+        && text.starts_with(|c: char| c.is_ascii_alphanumeric())
+    {
+        out.push(' ');
+    }
+    out.push_str(text);
 }
 
 fn build(
@@ -396,10 +534,21 @@ fn build_local(
     // Punctuation is optional: an unloadable model (moved, deleted, broken)
     // leaves the engine usable with its raw text. Its files are checked first:
     // a folder that is no longer a punctuation model would end the process.
-    let punct = match (&settings.punct_model, caps.punctuated) {
-        (Some(punct_dir), false) => {
-            match check_punct(punct_dir).and_then(|()| PunctuationConfig::new(punct_dir).load()) {
-                Ok(punct) => Some(Arc::new(punct)),
+    let punct = match &settings.punct_model {
+        Some(punct_dir) => {
+            // Native marks are provisional when a Chinese/English
+            // model is available. An English-only model cannot replace them.
+            let load = || {
+                let punct_family = punct_family(punct_dir)?;
+                if caps.punctuated && punct_family != PunctuationFamily::CtTransformer {
+                    return Ok(None);
+                }
+                PunctuationConfig::new(punct_dir)
+                    .load()
+                    .map(|p| Some(Arc::new(p)))
+            };
+            match load() {
+                Ok(punct) => punct,
                 Err(error) => {
                     tracing::warn!(
                         error = %describe(&error),
@@ -410,7 +559,7 @@ fn build_local(
                 }
             }
         }
-        _ => None,
+        None => None,
     };
     Ok(LoadedEngine {
         info: EngineInfo {
@@ -419,10 +568,10 @@ fn build_local(
             kind: meta.label.into(),
             on_device: true,
             live: caps.reports_partials,
-            punctuation: if caps.punctuated {
-                "native"
-            } else if punct.is_some() {
+            punctuation: if punct.is_some() {
                 "model"
+            } else if caps.punctuated {
+                "native"
             } else {
                 "none"
             },
@@ -584,7 +733,6 @@ fn build_openai(settings: &Settings, runtime: &CloudRuntime) -> Result<LoadedEng
         upper_case: false,
     })
 }
-
 fn build_dashscope(
     settings: &Settings,
     runtime: &CloudRuntime,
@@ -700,6 +848,7 @@ impl Engines {
             // Large models take a while; the wait only bounds a stuck load.
             let outcome = engines
                 .manager
+
                 .wait(generation, Instant::now() + Duration::from_secs(600));
             let outcome = match outcome {
                 Ok(()) => engines
@@ -721,6 +870,7 @@ impl Engines {
     /// Drops the current engine, and any load in flight, so new
     /// dictations have none.
     pub fn unload(&self) {
+
         {
             let mut status = lock(&self.status);
             status.loading = None;
@@ -758,6 +908,134 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CheckedPunctuation {
+        input: &'static str,
+        output: Option<&'static str>,
+    }
+
+    impl PostProcessor for CheckedPunctuation {
+        fn process(&self, text: &str) -> Result<String, SpeechError> {
+            assert_eq!(text, self.input);
+            self.output
+                .map(str::to_owned)
+                .ok_or_else(|| SpeechError::backend("test", false, "unavailable"))
+        }
+    }
+
+    fn boundaries_of(texts: &[&str], input: &'static str, output: Option<&'static str>) -> String {
+        punctuate_boundaries(texts, &CheckedPunctuation { input, output })
+    }
+
+    #[test]
+    fn a_pause_is_not_a_sentence_end() {
+        assert_eq!(
+            boundaries_of(
+                &["从而导致不该间断的地方。", "被加上了标点符号。"],
+                "从而导致不该间断的地方被加上了标点符号",
+                Some("从而导致不该间断的地方被加上了标点符号。"),
+            ),
+            "从而导致不该间断的地方被加上了标点符号。"
+        );
+        assert_eq!(
+            boundaries_of(
+                &["我今天去了超市。", "买了很多东西。", "然后回家做饭。"],
+                "我今天去了超市买了很多东西然后回家做饭",
+                Some("我今天去了超市，买了很多东西，然后回家做饭。"),
+            ),
+            "我今天去了超市，买了很多东西，然后回家做饭。"
+        );
+    }
+
+    #[test]
+    fn a_sentence_end_keeps_the_recognizers_mark() {
+        assert_eq!(
+            boundaries_of(
+                &["太好了！", "我们明天见。"],
+                "太好了我们明天见",
+                Some("太好了。我们明天见。"),
+            ),
+            "太好了！我们明天见。"
+        );
+    }
+
+    #[test]
+    fn english_boundaries_get_ascii_marks() {
+        assert_eq!(
+            boundaries_of(
+                &["Hello.", "how are you?", "I am fine", "thanks"],
+                "Hello how are you I am fine thanks",
+                Some("Hello，how are you？I am fine。thanks。"),
+            ),
+            "Hello, how are you? I am fine. thanks"
+        );
+        assert_eq!(
+            boundaries_of(&["speech.", "kit is fast."], "speech kit is fast.", Some("speech kit is fast .。")),
+            "speech kit is fast."
+        );
+    }
+
+    #[test]
+    fn text_inside_segments_is_kept_as_recognized() {
+        assert_eq!(
+            boundaries_of(
+                &["版本 1.2.3，价格 3.14。", "网址 example.com。"],
+                "版本 1.2.3价格 3.14网址 example.com",
+                Some("版本1 . 2 . 3，价格3 . 14，网址example . com。"),
+            ),
+            "版本 1.2.3，价格 3.14，网址 example.com。"
+        );
+        assert_eq!(
+            boundaries_of(
+                &["“你好！”她说。", "明天见。"],
+                "你好她说明天见",
+                Some("你好，她说，明天见。"),
+            ),
+            "“你好！”她说，明天见。"
+        );
+    }
+
+    #[test]
+    fn a_boundary_the_model_does_not_line_up_with_keeps_its_mark() {
+        // The model dropped words after the first boundary.
+        assert_eq!(
+            boundaries_of(
+                &["我很好。", "谢谢你。", "再见。"],
+                "我很好谢谢你再见",
+                Some("我很好，谢谢。"),
+            ),
+            "我很好，谢谢你。再见。"
+        );
+        // A mark right before the output stops is not confirmed either.
+        assert_eq!(
+            boundaries_of(&["我很好。", "谢谢你。"], "我很好谢谢你", Some("我很好，")),
+            "我很好。谢谢你。"
+        );
+        for output in [None, Some(""), Some("完全不同的内容。")] {
+            assert_eq!(
+                boundaries_of(&["我很好。", "谢谢你。"], "我很好谢谢你", output),
+                "我很好。谢谢你。"
+            );
+        }
+    }
+
+    #[test]
+    fn one_segment_needs_no_model() {
+        for texts in [&[][..], &[" "], &["我很好。"], &["我很好。", " "]] {
+            let joined = texts.iter().map(|t| t.trim()).collect::<String>();
+            assert_eq!(boundaries_of(texts, "must not be called", None), joined);
+        }
+    }
+
+    #[test]
+    fn unpunctuated_text_takes_the_models_output_unless_it_fails() {
+        let punct = |output| CheckedPunctuation { input: "speech kit is fast", output };
+        assert_eq!(punctuate_text("speech kit is fast", &punct(Some("Speech kit is fast."))), "Speech kit is fast.");
+        for output in [None, Some(" ")] {
+            assert_eq!(punctuate_text("speech kit is fast", &punct(output)), "speech kit is fast");
+        }
+        assert_eq!(punctuate_text(" ", &punct(None)), " ");
+    }
 
     #[test]
     fn hotwords_are_checked_by_halves() {
@@ -834,7 +1112,6 @@ mod tests {
         assert_eq!(ids(&found)[0], "transducer");
     }
 
-
     #[test]
     fn an_unknown_folder_names_the_problem() {
         let dir = dir_with("unknown", &[("readme.md", "hi")]);
@@ -907,7 +1184,7 @@ mod tests {
 
     fn transcribe(loaded: &LoadedEngine, wav: &Path) -> (String, String) {
         let audio = speechkit::audio::read(wav, speechkit::audio::DecodeLimits::default()).unwrap();
-        let mut outcome = loaded
+        let outcome = loaded
             .engine
             .transcribe(
                 &audio,
@@ -915,11 +1192,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(120),
             )
             .unwrap();
-        let raw = outcome.text();
-        for segment in &mut outcome.segments {
-            loaded.punctuate(&mut segment.text);
-        }
-        (raw, outcome.text())
+        (outcome.text(), loaded.punctuate(&outcome, str::to_owned))
     }
 
     #[test]
@@ -1125,6 +1398,77 @@ mod tests {
         assert_eq!(text, expected);
         assert!(text.starts_with("speechkit"), "{text}");
         assert_eq!(raw, "speech kit is fast");
+
+        // Pausing between words must not cause an extra punctuation call.
+        let transcript = speechkit::asr::Transcript::new(
+            ["speech kit", "is", "fast"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, text)| speechkit::asr::Segment {
+                    utterance: speechkit::asr::UtteranceId(i as u64),
+                    text: text.into(),
+                    start: Duration::from_secs(i as u64 * 5),
+                    end: Duration::from_secs(i as u64 * 5 + 1),
+                })
+                .collect(),
+            Duration::from_secs(11),
+        );
+        assert_eq!(
+            crate::dictation::finish(&settings, "", Some(&loaded), transcript),
+            expected
+        );
+    }
+
+    #[test]
+    #[ignore = "needs SenseVoice, FunASR-Nano and Chinese/English CT-Transformer models"]
+    fn native_engines_restore_punctuation_after_joining_the_dictation() {
+        for folder in [SENSE_VOICE, "sherpa-onnx-funasr-nano-int8-2025-12-30"] {
+            let mut settings = Settings {
+                punct_model: Some(
+                    models()
+                        .join("sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8"),
+                ),
+                ..Settings::default()
+            };
+            let id = add(&mut settings, folder);
+            let loaded = build(&id, &settings, &CloudRuntime::owned(1).unwrap()).unwrap();
+            assert_eq!(loaded.info.punctuation, "model");
+            let transcript = speechkit::asr::Transcript::new(
+                ["从而导致不该间断的地方。", "被加上了标点符号。"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, text)| speechkit::asr::Segment {
+                        utterance: speechkit::asr::UtteranceId(i as u64),
+                        text: text.into(),
+                        start: Duration::from_secs(i as u64 * 8),
+                        end: Duration::from_secs(i as u64 * 8 + 2),
+                    })
+                    .collect(),
+                Duration::from_secs(10),
+            );
+            let text = crate::dictation::finish(&settings, "", Some(&loaded), transcript);
+            assert_eq!(text, "从而导致不该间断的地方被加上了标点符号。");
+
+            let transcript = speechkit::asr::Transcript::new(
+                ["版本 1.2.3，价格 3.14！", "网址 example.com。"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, text)| speechkit::asr::Segment {
+                        utterance: speechkit::asr::UtteranceId(i as u64),
+                        text: text.into(),
+                        start: Duration::from_secs(i as u64 * 8),
+                        end: Duration::from_secs(i as u64 * 8 + 2),
+                    })
+                    .collect(),
+                Duration::from_secs(10),
+            );
+            let text = loaded.punctuate(&transcript, str::to_owned);
+            eprintln!("numbers and domain: {text}");
+            assert!(
+                text.starts_with("版本 1.2.3，价格 3.14") && text.ends_with("网址 example.com。"),
+                "{text}"
+            );
+        }
     }
 
     #[test]

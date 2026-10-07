@@ -849,21 +849,21 @@ fn deliver(app: &AppHandle, text: &str, target: &TargetApp) -> Delivery {
     Delivery::Pasted
 }
 
-/// Applies per-app dictionary replacements, optional punctuation, then
-/// restores dictionary spellings. The caller keeps the original transcript.
+/// Punctuates the completed dictation, then applies dictionary replacements
+/// to the joined text, so they can span recognition boundaries. The caller
+/// keeps the original transcript.
 pub fn finish(
     settings: &Settings,
     app: &str,
     engine: Option<&LoadedEngine>,
-    mut transcript: Transcript,
+    transcript: Transcript,
 ) -> String {
-    for segment in &mut transcript.segments {
-        segment.text = dictionary::apply(&settings.dictionary, app, &segment.text);
-        if let Some(engine) = engine {
-            engine.punctuate(&mut segment.text);
-        }
-    }
-    dictionary::apply(&settings.dictionary, app, &transcript.text())
+    let fix = |text: &str| dictionary::apply(&settings.dictionary, app, text);
+    let text = match engine {
+        Some(engine) => engine.punctuate(&transcript, fix),
+        None => transcript.text(),
+    };
+    fix(&text)
 }
 
 fn context(target: &TargetApp, info: &EngineInfo) -> String {
@@ -1040,6 +1040,22 @@ mod tests {
             finish(&Settings::default(), "", None, transcript),
             "你好，世界hello world"
         );
+    }
+
+    #[test]
+    fn dictionary_replacements_can_span_recognition_boundaries() {
+        let mut settings = Settings::default();
+        settings.dictionary.push(crate::settings::DictionaryEntry {
+            word: "SpeechKit".into(),
+            sounds_like: vec!["speech kit".into()],
+            ..Default::default()
+        });
+        let transcript = transcript(&["speech", "kit is fast"]);
+        assert_eq!(
+            finish(&settings, "", None, transcript.clone()),
+            "SpeechKit is fast"
+        );
+        assert_eq!(transcript.text(), "speech kit is fast");
     }
 
     fn with_local() -> Settings {

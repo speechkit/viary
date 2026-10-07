@@ -35,7 +35,8 @@ function LocalCard({ s, model, onError }: { s: Snapshot; model: LocalModel; onEr
   const checked = s.engine.active?.id === id;
   const state = modelState(s, id, model, family);
   const tags = [...(family?.tags ?? [])];
-  if (family && !family.nativePunctuation) tags.push(s.settings.punctModel ? "+ Punctuation model" : "No punctuation");
+  if (family && !family.nativePunctuation) tags.push(s.settings.punctModel ? "+ Paragraph punctuation" : "No punctuation");
+  if (family?.nativePunctuation && s.punctLayout?.startsWith("CT-Transformer")) tags.push("+ Paragraph punctuation");
   return (
     <div
       className={
@@ -447,7 +448,7 @@ export function EnginePage({ s }: { s: Snapshot }) {
         />
         <PathRow
           title="Punctuation"
-          caption="A sherpa-onnx punctuation model, for engines that write none, such as Streaming Zipformer."
+          caption="Adds punctuation to the whole dictation after you release the key. Choose CT-Transformer (Chinese and English) to replace pause-based sentence breaks from local engines such as SenseVoice and FunASR-Nano."
           value={settings.punctModel && `${settings.punctModel}${s.punctLayout ? ` · ${s.punctLayout}` : ""}`}
           choose={choosePunct}
           clear={() => api.setPunctModel(null)}

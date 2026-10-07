@@ -303,7 +303,8 @@ pub struct Settings {
     pub active_engine: Option<String>,
     /// `silero_vad.onnx`, needed by offline models.
     pub vad_model: Option<PathBuf>,
-    /// A punctuation model folder, for engines without native punctuation.
+    /// A punctuation model folder for the completed dictation. CT-Transformer
+    /// also replaces local engines' native punctuation using the full text.
     pub punct_model: Option<PathBuf>,
     /// `cpu` or `coreml`.
     pub provider: String,
