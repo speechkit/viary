@@ -40,9 +40,10 @@ const RIGHT_COMMAND: u64 = 0x0000_0010;
 
 fn encode(hotkey: Hotkey) -> u8 {
     match hotkey {
-        Hotkey::Fn => 0,
         Hotkey::RightOption => 1,
         Hotkey::RightCommand => 2,
+        // Keys from other systems, in settings copied from them.
+        _ => 0,
     }
 }
 

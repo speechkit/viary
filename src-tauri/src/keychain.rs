@@ -57,16 +57,31 @@ mod imp {
     }
 }
 
+/// Windows Credential Manager and the Linux Secret Service (GNOME
+/// Keyring), under the same service and account names.
 #[cfg(not(target_os = "macos"))]
 mod imp {
-    pub(super) fn set(_: &str, _: &str) -> Result<(), String> {
-        Err("the Keychain is only available on macOS".into())
+    use keyring::{Entry, Error};
+
+    use super::SERVICE;
+
+    fn entry(account: &str) -> Result<Entry, String> {
+        Entry::new(SERVICE, account).map_err(|e| e.to_string())
     }
-    pub(super) fn get(_: &str) -> Option<String> {
-        None
+
+    pub(super) fn set(account: &str, value: &str) -> Result<(), String> {
+        entry(account)?.set_password(value).map_err(|e| e.to_string())
     }
-    pub(super) fn delete(_: &str) -> Result<(), String> {
-        Ok(())
+
+    pub(super) fn get(account: &str) -> Option<String> {
+        entry(account).ok()?.get_password().ok()
+    }
+
+    pub(super) fn delete(account: &str) -> Result<(), String> {
+        match entry(account)?.delete_credential() {
+            Ok(()) | Err(Error::NoEntry) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
     }
 }
 

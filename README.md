@@ -44,6 +44,15 @@ Engines such as SenseVoice do not support recognition hotwords. With these engin
 
 For an independent polish service, choose **Custom** under **Polish & tone** to connect to an OpenAI-compatible chat API. Enter its API base URL and chat model ID, and an API key if required. **Test connection** uses the current form without saving it; **Save** stores the settings and puts the key in a separate macOS Keychain entry. Leave the key field blank to keep a stored key, or use **Remove key** for an unauthenticated server. OpenAI and DashScope presets continue to reuse Voice engine credentials. Only transcripts are sent for polishing; the destination is shown in the model card.
 
+## Windows and Linux
+
+The parts that talk to the system live in `src-tauri/src/platform/`, one module per system with the same items; everything else is shared.
+
+- **Windows** (in progress): hold Right Alt or Ctrl + Win, watched by a low-level keyboard hook that only listens. Text goes in with Ctrl+V through `SendInput`, with the clipboard saved and restored and kept out of clipboard history. Apps running as administrator do not accept Viary's keys, so their text stays on the clipboard. API keys are in Windows Credential Manager. Left-click the tray icon for the flyout, right-click for the menu.
+- **Linux** (not yet): the module only keeps the app building. The plan is the GNOME design: an AppIndicator, a talk shortcut from GNOME, and typing through Viary's GNOME Shell extension or the remote-interaction portal.
+
+CI builds and tests on macOS, Windows, and Ubuntu (`.github/workflows/ci.yml`). `/preview.html?os=windows` renders the windows as they look on Windows.
+
 ## Tests
 
 ```sh

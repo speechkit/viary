@@ -10,14 +10,30 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-/// The key that starts a dictation while held.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// The key that starts a dictation while held. Each system offers its own:
+/// fn, right ⌥, and right ⌘ on macOS; Right Alt and Ctrl + Win on Windows;
+/// on Linux, a shortcut the desktop hands to Viary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Hotkey {
-    #[default]
     Fn,
     RightOption,
     RightCommand,
+    RightAlt,
+    CtrlWin,
+    Shortcut,
+}
+
+impl Default for Hotkey {
+    fn default() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Fn
+        } else if cfg!(target_os = "windows") {
+            Self::RightAlt
+        } else {
+            Self::Shortcut
+        }
+    }
 }
 
 /// The spoken language passed to engines that accept an override.
@@ -411,7 +427,7 @@ impl Default for Settings {
             threads: 2,
             microphone: None,
             language: Language::Auto,
-            hotkey: Hotkey::Fn,
+            hotkey: Hotkey::default(),
             keep_recordings_days: 7,
             openai: OpenAiSettings::default(),
             dashscope: DashScopeSettings::default(),
