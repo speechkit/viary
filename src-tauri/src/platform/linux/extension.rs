@@ -217,3 +217,17 @@ async fn actions(app: &AppHandle) -> zbus::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    /// Run by `ci/gnome-wayland.sh`, inside a headless GNOME Shell with the
+    /// extension installed: Viary finds it and it answers.
+    #[test]
+    #[ignore = "needs GNOME Shell running Viary's extension"]
+    fn gnome_extension_answers() {
+        assert_eq!(super::status(), super::Status::Active);
+        assert!(super::focused_app().is_some(), "FocusedApp did not answer");
+        super::paste().expect("Paste");
+        super::undo().expect("Undo");
+    }
+}

@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-24.04]
+        os: [macos-latest, windows-latest, ubuntu-26.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -48,3 +48,15 @@ jobs:
       - name: Tests
         working-directory: src-tauri
         run: cargo test
+
+      # A headless GNOME Shell on Wayland, as Ubuntu 26.04 runs it, with
+      # Viary's extension and the desktop portals.
+      - name: GNOME packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y gnome-shell mutter xwayland dbus-daemon dconf-service \
+            xdg-desktop-portal xdg-desktop-portal-gnome libgl1-mesa-dri
+      - name: GNOME on Wayland
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: dbus-run-session -- ci/gnome-wayland.sh
