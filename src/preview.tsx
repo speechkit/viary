@@ -29,6 +29,7 @@ import type {
   TranscriptDoc,
   TranscriptSettings,
 } from "./lib/ipc";
+import { PLATFORM } from "./lib/platform";
 
 const params = new URLSearchParams(location.search);
 const label = params.get("w") ?? "main";
@@ -40,7 +41,15 @@ const now = Date.now();
 // without it, the preview has speechkit 0.5's real capabilities.
 const mockCaps = params.get("caps") === "mock";
 
+// ?os=windows or ?os=linux renders that system's windows and wording.
+const HOTKEYS = {
+  macos: { hotkey: "fn", name: "fn" },
+  windows: { hotkey: "rightAlt", name: "Right Alt" },
+  linux: { hotkey: "shortcut", name: "Ctrl+Alt+Space" },
+} as const;
+
 const snapshot: Snapshot = {
+  platform: PLATFORM,
   speechCaps: { speakers: mockCaps, wordTimings: mockCaps, wordConfidence: mockCaps, mock: mockCaps },
   settings: {
     // ?fileEngine=dashscope (no key here) or local:gone shows an engine for files that can't be used.
@@ -56,7 +65,7 @@ const snapshot: Snapshot = {
     threads: 2,
     microphone: null,
     language: "auto",
-    hotkey: "fn",
+    hotkey: HOTKEYS[PLATFORM].hotkey,
     keepRecordingsDays: 7,
     openai: { baseUrl: "https://api.openai.com/v1", model: "", mode: "file" },
     dashscope: { model: "", region: "china" },
@@ -97,8 +106,9 @@ const snapshot: Snapshot = {
   keys: { openAi: true, dashScope: false, customPolish: false },
   permissions: { accessibility: true, inputMonitoring: true },
   hotkeyActive: true,
-  hotkeyName: "fn",
+  hotkeyName: HOTKEYS[PLATFORM].name,
   pill: { kind: "idle" },
+  paused: null,
   families: [
     ["1", { id: "streaming-transducer", label: "Streaming Zipformer", description: "Shows words while you speak. Commits a phrase at each pause.", tags: ["Live preview", "Hotwords"], streaming: true, needsVad: false, nativePunctuation: false }],
     ["2", { id: "sense-voice", label: "SenseVoice", description: "Fast and punctuated. Transcribes each phrase after a pause.", tags: ["5 languages", "Punctuation"], streaming: false, needsVad: true, nativePunctuation: true }],
@@ -522,6 +532,17 @@ mockIPC(
     if (cmd === "polish_preview") {
       await new Promise((r) => setTimeout(r, 700));
       return "Can you rerun the nightly with three test threads? Models aborted again.";
+    }
+    if (cmd === "pause_dictation") {
+      const minutes = a.minutes as number | null;
+      snapshot.paused = { until: minutes ? Date.now() + minutes * 60_000 : null };
+      changed();
+      return null;
+    }
+    if (cmd === "resume_dictation") {
+      snapshot.paused = null;
+      changed();
+      return null;
     }
     if (cmd === "history_list") return history;
     if (cmd === "audio_extensions") return ["aac", "flac", "m4a", "mka", "mkv", "mp3", "mp4", "oga", "ogg", "wav"];

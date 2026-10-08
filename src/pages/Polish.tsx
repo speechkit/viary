@@ -16,6 +16,7 @@ import {
   type Snapshot,
   type Tone,
 } from "../lib/ipc";
+import { KEY_STORE, THIS_COMPUTER } from "../lib/platform";
 
 const TONES: { value: Tone; label: string }[] = [
   { value: "formal", label: "Formal" },
@@ -96,7 +97,7 @@ function destination(baseUrl: string): string {
     const host = url.hostname.toLowerCase();
     const local = host === "localhost" || host === "localhost." || host === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(host);
     return local
-      ? "Transcripts are sent to a local server on this Mac."
+      ? `Transcripts are sent to a local server on ${THIS_COMPUTER}.`
       : `Transcripts are sent to ${url.host}. Audio is not sent for polishing.`;
   } catch {
     return "Enter a valid server base URL.";
@@ -220,7 +221,7 @@ function ModelCard({ s, onError }: { s: Snapshot; onError: (e: string) => void }
               />
             </Field>
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-              <span className="grow">{s.keys.customPolish ? "API key stored in Keychain. Leave blank to keep it." : "Saved keys are stored in the macOS Keychain."}</span>
+              <span className="grow">{s.keys.customPolish ? `API key stored in ${KEY_STORE}. Leave blank to keep it.` : `Saved keys are stored in ${KEY_STORE}.`}</span>
               {s.keys.customPolish && (
                 <button type="button" className={btnDanger} onClick={removeKey}>Remove key</button>
               )}

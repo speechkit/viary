@@ -2,14 +2,22 @@
 
 import { Icon, Kbd } from "../components/Icons";
 import { api, type Hotkey, type Snapshot } from "../lib/ipc";
+import { PLATFORM, type Platform } from "../lib/platform";
 
 const btn = "inline-flex h-8 shrink-0 items-center whitespace-nowrap gap-2 rounded-lg border border-edge bg-white px-3 text-[13px] font-medium text-ink";
 
-const KEYS: [Hotkey, string, string][] = [
-  ["fn", "fn", "The globe key. Set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing”."],
-  ["rightOption", "right ⌥", "The Option key right of the space bar."],
-  ["rightCommand", "right ⌘", "The Command key right of the space bar."],
-];
+const KEYS: Record<Platform, [Hotkey, string, string][]> = {
+  macos: [
+    ["fn", "fn", "The globe key. Set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing”."],
+    ["rightOption", "right ⌥", "The Option key right of the space bar."],
+    ["rightCommand", "right ⌘", "The Command key right of the space bar."],
+  ],
+  windows: [
+    ["rightAlt", "Right Alt", "The Alt key right of the space bar. Recommended."],
+    ["ctrlWin", "Ctrl + Win", "Both keys left of the space bar, held together."],
+  ],
+  linux: [["shortcut", "Ctrl+Alt+Space", "A shortcut GNOME hands to Viary."]],
+};
 
 function Permission({
   granted,
@@ -47,7 +55,7 @@ export function SettingsPage({ s }: { s: Snapshot }) {
 
       <h2 className="m-0 text-xs font-semibold tracking-[.04em] text-faint uppercase">Dictation key</h2>
       <div role="radiogroup" aria-label="Dictation key" className="grid grid-cols-3 gap-3.5">
-        {KEYS.map(([key, label, text]) => {
+        {KEYS[PLATFORM].map(([key, label, text]) => {
           const on = s.settings.hotkey === key;
           return (
             <button
@@ -71,6 +79,51 @@ export function SettingsPage({ s }: { s: Snapshot }) {
         })}
       </div>
       <span className="text-[13px] text-muted">Hold the key while you speak and release it to insert. Double-tap it for hands-free: Viary listens until you tap it again.</span>
+      {PLATFORM === "windows" && (
+        <span className="rounded-[10px] border border-[#F0DDB6] bg-[#FFF6E6] px-4 py-3 text-[13px] leading-[1.45] text-[#6B4A00]">
+          On keyboards where Right Alt is AltGr (German, French, Polish…), choose Ctrl + Win so accented letters keep
+          working. Win + H stays with Windows voice typing.
+        </span>
+      )}
+
+      {PLATFORM === "windows" ? <WindowsPermissions s={s} /> : <MacPermissions s={s} />}
+    </main>
+  );
+}
+
+/** Windows asks for nothing but the microphone switch. */
+function WindowsPermissions({ s }: { s: Snapshot }) {
+  return (
+    <>
+      <h2 className="m-0 text-xs font-semibold tracking-[.04em] text-faint uppercase">Permissions</h2>
+      <div className="overflow-hidden rounded-[14px] border border-line bg-white">
+        <div className="flex items-center gap-3.5 px-[18px] py-3">
+          <span className={`size-2 shrink-0 rounded-full ${s.permissions.microphone !== false ? "bg-teal" : "bg-amber"}`} />
+          <div className="flex min-w-0 grow flex-col gap-0.5">
+            <span className="text-sm font-medium">Microphone</span>
+            <span className="text-[13px] leading-[1.45] text-muted">
+              “Let desktop apps access your microphone” in Settings › Privacy &amp; security › Microphone.
+            </span>
+          </div>
+          {s.permissions.microphone !== false ? (
+            <span className="text-[13px] text-teal-ink">Allowed</span>
+          ) : (
+            <button type="button" className={btn} onClick={() => api.requestPermission("microphone")}>
+              Open Settings
+            </button>
+          )}
+        </div>
+      </div>
+      <span className="text-[13px] text-muted">
+        Viary cannot type into apps running as administrator; there, the text stays on the clipboard.
+      </span>
+    </>
+  );
+}
+
+function MacPermissions({ s }: { s: Snapshot }) {
+  return (
+    <>
 
       <h2 className="m-0 text-xs font-semibold tracking-[.04em] text-faint uppercase">Permissions</h2>
       <div className="overflow-hidden rounded-[14px] border border-line bg-white">
@@ -100,6 +153,6 @@ export function SettingsPage({ s }: { s: Snapshot }) {
       <span className="text-[13px] text-muted">
         After allowing a permission, macOS may ask you to quit and reopen Viary.
       </span>
-    </main>
+    </>
   );
 }

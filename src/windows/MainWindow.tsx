@@ -12,6 +12,7 @@ import { PolishPage } from "../pages/Polish";
 import { SettingsPage } from "../pages/Settings";
 import { TranscriptsPage } from "../pages/Transcripts";
 import { VoiceNotesPage } from "../pages/VoiceNotes";
+import { isMac, THIS_COMPUTER } from "../lib/platform";
 
 type MainPage = "home" | "history" | "dictionary" | "polish" | "engine" | "settings";
 type Tool = "notes" | "transcripts";
@@ -42,7 +43,7 @@ function StatusCard({ s }: { s: Snapshot }) {
   const active = s.engine.active;
   let dot = "bg-teal";
   let title = "Ready · on-device";
-  let text = `${active?.name}: audio never leaves this Mac.`;
+  let text = `${active?.name}: audio never leaves ${THIS_COMPUTER}.`;
   if (s.engine.loading) {
     dot = "bg-amber";
     title = "Loading engine…";
@@ -88,7 +89,8 @@ function Sidebar({ page, go, s }: { page: Page; go: (p: Page) => void; s: Snapsh
   return (
     <nav
       aria-label="Main"
-      className="flex h-full w-[232px] shrink-0 flex-col gap-1 border-r border-rule bg-sand px-3 pt-[46px] pb-4"
+      // macOS draws the traffic lights over the top of the sidebar.
+      className={`flex h-full w-[232px] shrink-0 flex-col gap-1 border-r border-rule bg-sand px-3 pb-4 ${isMac ? "pt-[46px]" : "pt-5"}`}
     >
       <div data-tauri-drag-region className="absolute top-0 left-0 h-[40px] w-[232px]" />
       <div className="flex items-center gap-2.5 px-2 pb-5">

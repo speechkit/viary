@@ -17,6 +17,7 @@ import {
   type Provider,
   type Snapshot,
 } from "../lib/ipc";
+import { isMac, KEY_STORE, THIS_COMPUTER } from "../lib/platform";
 
 /** A local model's line under its card: installed, in use, loading, failed. */
 function modelState(s: Snapshot, id: string, model: LocalModel, family?: FamilyInfo): { text: string; color: string } {
@@ -214,7 +215,7 @@ function KeyField({ s, provider, onError }: { s: Snapshot; provider: Provider; o
       <div className="flex items-center gap-2">
         <span className="inline-flex items-center gap-1.5 text-[13px] whitespace-nowrap text-teal-ink">
           <Icon name="shield" size={14} />
-          Stored in the Keychain
+          Stored in {KEY_STORE}
         </span>
         <div className="grow" />
         <button type="button" className={btn} onClick={() => setReplacing(true)}>
@@ -253,7 +254,7 @@ function KeyField({ s, provider, onError }: { s: Snapshot; provider: Provider; o
         onChange={(e) => setKey(e.target.value)}
       />
       <button type="submit" className={btnPrimary} disabled={!key.trim()}>
-        Save to Keychain
+        {isMac ? "Save to Keychain" : "Save key"}
       </button>
       {replacing && (
         <button type="button" className={btn} onClick={() => setReplacing(false)}>
@@ -434,7 +435,7 @@ export function EnginePage({ s }: { s: Snapshot }) {
 
       <ErrorBanner error={error} onDismiss={() => setError("")} />
 
-      <H2>On this Mac</H2>
+      <H2>On {THIS_COMPUTER}</H2>
       <div role="radiogroup" aria-label="Recognition engine" className="grid grid-cols-3 gap-3.5">
         {settings.localModels.map((m) => (
           <LocalCard key={m.id} s={s} model={m} onError={setError} />
