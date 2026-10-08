@@ -451,6 +451,8 @@ export const api = {
   setKeyTest: (on: boolean) => invoke<void>("set_key_test", { on }),
   /** Closes the setup window for good; Viary goes on in the tray. */
   finishSetup: () => invoke<void>("finish_setup"),
+  /** Closes the first-launch tray tip; `showMe` opens the taskbar settings (Windows). */
+  closeTrayTip: (showMe: boolean) => invoke<void>("close_tray_tip", { showMe }),
   /** Asks GNOME for the talk shortcut (Linux). */
   bindShortcut: () => invoke<void>("bind_shortcut"),
   /** How Viary types on Wayland; `portal` asks GNOME now (Linux). */

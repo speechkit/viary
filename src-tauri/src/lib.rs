@@ -737,11 +737,33 @@ fn set_key_test(state: State<'_, App>, on: bool) {
 #[tauri::command]
 fn finish_setup(app: AppHandle, state: State<'_, App>) {
     state.key_test.store(false, Ordering::SeqCst);
-    state.change(|s| s.setup_done = true);
+    let before = state.settings();
+    state.change(|s| {
+        s.setup_done = true;
+        s.tray_tip_shown = true;
+    });
     if let Some(setup) = app.get_webview_window("setup") {
         let _ = setup.close();
     }
+    // Windows hides a new tray icon under ^: say where Viary went, once.
+    if cfg!(target_os = "windows")
+        && !before.tray_tip_shown
+        && let Err(error) = ui::show_tray_tip(&app)
+    {
+        tracing::warn!(%error, "cannot show the tray tip");
+    }
     ui::refresh(&app);
+}
+
+/// Closes the tray tip; `show_me` opens the taskbar settings first.
+#[tauri::command]
+fn close_tray_tip(app: AppHandle, show_me: bool) {
+    if show_me {
+        permissions::open_settings("taskbar");
+    }
+    if let Some(tip) = app.get_webview_window("tip") {
+        let _ = tip.close();
+    }
 }
 
 #[tauri::command]
@@ -1324,6 +1346,7 @@ pub fn run() {
             set_typing,
             install_extension,
             finish_setup,
+            close_tray_tip,
             get_state,
             list_microphones,
             inspect_model,

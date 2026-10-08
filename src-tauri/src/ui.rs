@@ -261,6 +261,42 @@ pub fn build_setup(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .build()
 }
 
+/// The tip window: the card, and room around it for its shadow.
+const TIP_SIZE: (f64, f64) = (388.0, 200.0);
+
+/// Shows the first-launch tip above the tray, bottom right of the screen,
+/// where Windows notifications appear. It closes from its own buttons.
+pub fn show_tray_tip(app: &AppHandle) -> tauri::Result<()> {
+    if app.get_webview_window("tip").is_some() {
+        return Ok(());
+    }
+    let (width, height) = TIP_SIZE;
+    let window = WebviewWindowBuilder::new(app, "tip", WebviewUrl::default())
+        .title("Viary")
+        .inner_size(width, height)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        // Clicks without taking focus from the app being typed in.
+        .focusable(false)
+        .visible(false)
+        .build()?;
+    if let Ok(Some(monitor)) = window.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let area = monitor.work_area();
+        let at = area.position.to_logical::<f64>(scale);
+        let size = area.size.to_logical::<f64>(scale);
+        let _ = window.set_position(LogicalPosition::new(
+            at.x + size.width - width,
+            at.y + size.height - height,
+        ));
+    }
+    window.show()
+}
+
 pub fn build_pill(app: &AppHandle) -> tauri::Result<Option<WebviewWindow>> {
     // Wayland lets no app place a window or keep it above the others.
     #[cfg(target_os = "linux")]
