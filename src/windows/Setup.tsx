@@ -8,7 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ErrorBanner, Switch } from "../components/Controls";
 import { Icon, Mark } from "../components/Icons";
 import { AddModel } from "../pages/Engine";
-import { api, errorText, useHotkey, useSnapshot, type Desktop, type Hotkey, type Snapshot } from "../lib/ipc";
+import { api, errorText, useHotkey, useSnapshot, type Desktop, type Hotkey, type Snapshot, type Typing } from "../lib/ipc";
 import { PLATFORM, THIS_COMPUTER } from "../lib/platform";
 
 /** GNOME's look and steps: Ubuntu. Windows otherwise. */
@@ -511,7 +511,7 @@ function ShortcutStep({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
   );
 }
 
-const TYPING: { id: "extension" | "portal" | "clipboard"; title: string; text: string }[] = [
+const TYPING: { id: Typing; title: string; text: string }[] = [
   {
     id: "extension",
     title: "Viary’s GNOME Shell extension",
@@ -532,17 +532,19 @@ const TYPING: { id: "extension" | "portal" | "clipboard"; title: string; text: s
 function TypingStep({ desktop }: { s: Snapshot; desktop: Desktop }) {
   const [error, setError] = useState("");
   const [asking, setAsking] = useState(false);
-  const choose = async (method: "portal" | "clipboard") => {
+  const run = async (work: () => Promise<void>) => {
     setError("");
     setAsking(true);
     try {
-      await api.setTyping(method);
+      await work();
     } catch (e) {
       setError(errorText(e));
     } finally {
       setAsking(false);
     }
   };
+  const choose = (method: Typing) => run(() => api.setTyping(method));
+  const install = () => run(() => api.installExtension());
   if (desktop.session === "x11") {
     return (
       <>
@@ -561,30 +563,47 @@ function TypingStep({ desktop }: { s: Snapshot; desktop: Desktop }) {
       <ErrorBanner error={error} onDismiss={() => setError("")} />
       <div role="radiogroup" aria-label="Typing method" className={boxed}>
         {TYPING.map((t) => {
-          const soon = t.id === "extension";
-          const on = !soon && desktop.typing === t.id;
+          // The extension can be chosen once it runs: from the next login.
+          const waiting = t.id === "extension" && desktop.extension !== "active";
+          const on = !waiting && desktop.typing === t.id;
           return (
-            <button
-              key={t.id}
-              type="button"
-              role="radio"
-              aria-checked={on}
-              disabled={soon || asking}
-              onClick={() => !soon && choose(t.id as "portal" | "clipboard")}
-              className={row + " w-full py-3.5 text-left disabled:cursor-default" + (soon ? " opacity-55" : "")}
-            >
-              <span
-                aria-hidden="true"
-                className={"size-[18px] shrink-0 rounded-full " + (on ? "border-[5px] border-[#C34113]" : "border-[1.5px] border-[#B0B0B0]")}
-              />
-              <span className="flex grow flex-col gap-1">
-                <span className="flex items-center gap-2">
-                  {t.title}
-                  {soon && <span className="rounded-full bg-[#E1F2E8] px-2 py-0.5 text-[11px] font-semibold text-[#1D5E3C]">Coming soon</span>}
+            <div key={t.id} className={row + " py-3.5"}>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={on}
+                disabled={waiting || asking}
+                onClick={() => choose(t.id)}
+                className="flex grow items-center gap-3 text-left disabled:cursor-default"
+              >
+                <span
+                  aria-hidden="true"
+                  className={
+                    "size-[18px] shrink-0 rounded-full " +
+                    (on ? "border-[5px] border-[#C34113]" : "border-[1.5px] border-[#B0B0B0]") +
+                    (waiting ? " opacity-50" : "")
+                  }
+                />
+                <span className="flex grow flex-col gap-1">
+                  <span className="flex items-center gap-2">
+                    {t.title}
+                    {t.id === "extension" && (
+                      <span className="rounded-full bg-[#E1F2E8] px-2 py-0.5 text-[11px] font-semibold text-[#1D5E3C]">Recommended</span>
+                    )}
+                  </span>
+                  <span className={sub}>
+                    {t.id === "extension" && desktop.extension === "installed"
+                      ? "Installed. Log out and back in, and GNOME starts it; then choose it here."
+                      : t.text}
+                  </span>
                 </span>
-                <span className={sub}>{t.text}</span>
-              </span>
-            </button>
+              </button>
+              {t.id === "extension" && desktop.extension === "missing" && (
+                <button type="button" className={btn} disabled={asking} onClick={install}>
+                  Install…
+                </button>
+              )}
+            </div>
           );
         })}
       </div>
@@ -623,11 +642,13 @@ export function Setup() {
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState("");
   if (!s) return null;
-  const desktop = s.desktop ?? {
+  // Windows has no desktop choices; its steps never read these.
+  const desktop: Desktop = s.desktop ?? {
     session: "x11",
     shortcut: { mode: "hold", bound: true },
     typing: "clipboard",
     portalAllowed: false,
+    extension: "missing",
   };
   const last = step === STEPS.length - 1;
   const Body = BODIES[step];

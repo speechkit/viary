@@ -1,9 +1,11 @@
-//! Linux, as GNOME runs it: the talk shortcut GNOME hands over, typing
-//! through the RemoteDesktop portal (Wayland) or XTest (X11), the clipboard
-//! through X11 (XWayland on Wayland), and results as notifications where
-//! Wayland keeps the pill from floating.
+//! Linux, as GNOME runs it: the talk shortcut GNOME hands over; typing
+//! through Viary's GNOME Shell extension or the RemoteDesktop portal
+//! (Wayland), or XTest (X11); the clipboard through X11 (XWayland on
+//! Wayland); and the pill drawn by the extension, or results as
+//! notifications where Wayland keeps a window from floating.
 
 pub mod apps;
+pub mod extension;
 pub mod focus;
 pub mod hotkey;
 pub mod keys;
@@ -39,6 +41,8 @@ pub fn is_wayland() -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum Typing {
+    /// Through Viary's GNOME Shell extension: no prompts.
+    Extension,
     /// Through GNOME's RemoteDesktop portal: GNOME asks once.
     Portal,
     /// Ctrl+V is left to the user.
@@ -90,6 +94,13 @@ fn app() -> Option<&'static AppHandle> {
     DESKTOP.get().map(|d| &d.app)
 }
 
+/// The session bus, connected once: the pill's level alone calls it
+/// twenty times a second.
+async fn session_bus() -> ashpd::zbus::Result<ashpd::zbus::Connection> {
+    static BUS: tokio::sync::OnceCell<ashpd::zbus::Connection> = tokio::sync::OnceCell::const_new();
+    BUS.get_or_try_init(ashpd::zbus::Connection::session).await.cloned()
+}
+
 /// What the setup window and Settings show about the desktop.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,6 +111,7 @@ struct Status {
     typing: Typing,
     /// GNOME already allowed typing through the portal.
     portal_allowed: bool,
+    extension: extension::Status,
 }
 
 /// The desktop's state for the web views.
@@ -110,6 +122,7 @@ pub fn desktop() -> serde_json::Value {
         shortcut: hotkey::status(),
         typing: prefs.typing,
         portal_allowed: prefs.restore_token.is_some(),
+        extension: extension::status(),
     })
     .unwrap_or_default()
 }
@@ -124,6 +137,8 @@ pub fn bind_shortcut() -> Result<(), String> {
 /// comes while the user is choosing, not mid-dictation.
 pub fn set_typing(method: &str) -> Result<(), String> {
     let typing = match method {
+        "extension" if extension::active() => Typing::Extension,
+        "extension" => return Err("Viary's extension is not running yet. Log out and back in first.".into()),
         "portal" => Typing::Portal,
         "clipboard" => Typing::Clipboard,
         _ => return Err(format!("unknown typing method {method}")),
@@ -133,4 +148,14 @@ pub fn set_typing(method: &str) -> Result<(), String> {
     }
     change_prefs(|p| p.typing = typing);
     Ok(())
+}
+
+/// Installs Viary's GNOME Shell extension, which runs from the next login.
+pub fn install_extension() -> Result<(), String> {
+    extension::install()
+}
+
+/// Whether the shell draws the pill: Wayland, with the extension running.
+pub fn shell_pill() -> bool {
+    is_wayland() && extension::active()
 }

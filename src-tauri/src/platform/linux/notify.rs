@@ -58,7 +58,7 @@ pub fn pill(view: &PillView) {
 }
 
 async fn show(summary: &str, body: &str, actions: &[(String, String)]) -> zbus::Result<()> {
-    let connection = zbus::Connection::session().await?;
+    let connection = super::session_bus().await?;
     let actions: Vec<&str> = actions.iter().flat_map(|(id, label)| [id.as_str(), label.as_str()]).collect();
     let hints: HashMap<&str, Value<'_>> = HashMap::from([("desktop-entry", Value::from("viary"))]);
     let reply = connection
@@ -95,7 +95,7 @@ pub fn listen(app: &AppHandle) {
 }
 
 async fn actions(app: &AppHandle) -> zbus::Result<()> {
-    let connection = zbus::Connection::session().await?;
+    let connection = super::session_bus().await?;
     let rule = MatchRule::builder()
         .msg_type(Type::Signal)
         .interface(BUS)?

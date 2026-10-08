@@ -114,7 +114,14 @@ const snapshot: Snapshot = {
   autostart: true,
   desktop:
     PLATFORM === "linux"
-      ? { session: "wayland", shortcut: { mode: params.get("gnome") === "46" ? "toggle" : "hold", bound: false }, typing: "clipboard", portalAllowed: false }
+      ? {
+          session: "wayland",
+          shortcut: { mode: params.get("gnome") === "46" ? "toggle" : "hold", bound: false },
+          typing: "clipboard",
+          portalAllowed: false,
+          // ?ext=installed or ?ext=active: the extension's other states.
+          extension: (params.get("ext") as "installed" | "active" | null) ?? "missing",
+        }
       : null,
   families: [
     ["1", { id: "streaming-transducer", label: "Streaming Zipformer", description: "Shows words while you speak. Commits a phrase at each pause.", tags: ["Live preview", "Hotwords"], streaming: true, needsVad: false, nativePunctuation: false }],
@@ -559,8 +566,14 @@ mockIPC(
     }
     if (cmd === "set_typing" && snapshot.desktop) {
       await new Promise((r) => setTimeout(r, 400));
-      snapshot.desktop.typing = a.method as "portal" | "clipboard";
+      snapshot.desktop.typing = a.method as "extension" | "portal" | "clipboard";
       if (a.method === "portal") snapshot.desktop.portalAllowed = true;
+      changed();
+      return null;
+    }
+    if (cmd === "install_extension" && snapshot.desktop) {
+      await new Promise((r) => setTimeout(r, 600));
+      snapshot.desktop.extension = "installed";
       changed();
       return null;
     }
