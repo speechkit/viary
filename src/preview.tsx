@@ -556,7 +556,7 @@ mockIPC(
 const pills: Record<string, PillView> = {
   idle: { kind: "idle" },
   listening: { kind: "listening", token: 1, startedAt: now - 4000, context: "Mail", live: true },
-  handsFree: { kind: "handsFree", token: 1, startedAt: now - 102_000, limitMs: 300_000, context: "Notes", live: true },
+  handsFree: { kind: "handsFree", token: 1, startedAt: now - 102_000, limitMs: 300_000, context: "Microsoft PowerPoint · Cloud", live: true },
   transcribing: { kind: "transcribing", label: "Transcribing" },
   polishing: { kind: "polishing" },
   inserted: { kind: "inserted", label: "38 words", canRaw: true },

@@ -50,7 +50,7 @@ function Chip({
       aria-label={label}
       onClick={onClick}
       className={
-        "inline-flex h-8 items-center gap-1.5 rounded-full border-0 px-3 text-[13px] font-medium " +
+        "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border-0 px-3 text-[13px] font-medium " +
         (primary ? "bg-white text-pill hover:bg-white/90" : "bg-white/[0.14] text-white hover:bg-white/[0.24]")
       }
     >
@@ -59,11 +59,13 @@ function Chip({
   );
 }
 
+// The widest pill: the native window (820 px) less its side margins (2 x 40),
+// as set in ui.rs. Wider, it would be cut off.
 function Shell({ children, tight = false }: { children: React.ReactNode; tight?: boolean }) {
   return (
     <div
       className={
-        "pill-in flex h-[52px] items-center gap-3 whitespace-nowrap rounded-full bg-pill pl-[18px] text-sm text-white shadow-[0_12px_32px_rgba(0,0,0,.28)] " +
+        "pill-in flex h-[52px] max-w-[740px] items-center gap-3 whitespace-nowrap rounded-full bg-pill pl-[18px] text-sm text-white shadow-[0_12px_32px_rgba(0,0,0,.28)] " +
         (tight ? "pr-2" : "pr-[18px]")
       }
     >
@@ -84,7 +86,7 @@ function useNow(): number {
 
 function Wave({ levels }: { levels: number[] }) {
   return (
-    <div className="flex h-7 items-center gap-[3px]" aria-hidden="true">
+    <div className="flex h-7 shrink-0 items-center gap-[3px]" aria-hidden="true">
       {levels.map((level, i) => (
         <div
           key={i}
@@ -96,11 +98,11 @@ function Wave({ levels }: { levels: number[] }) {
   );
 }
 
-/** The live text, or what to expect before it. */
+/** The live text, or what to expect before it. It gives up room first. */
 function Words({ text, live }: { text: string; live: boolean }) {
   const { older, newest } = tail(text);
   return (
-    <div className="flex w-[320px] justify-end overflow-hidden text-[15px]">
+    <div className="flex w-[320px] min-w-[120px] justify-end overflow-hidden text-[15px]">
       {newest ? (
         <>
           <span className="text-white/60">{older}</span>
@@ -116,7 +118,9 @@ function Words({ text, live }: { text: string; live: boolean }) {
 function Context({ text }: { text: string }) {
   if (!text) return null;
   return (
-    <span className="inline-flex h-8 items-center rounded-full bg-white/[0.14] px-3 text-[13px] font-medium">{text}</span>
+    <span className="h-8 max-w-[220px] min-w-[60px] truncate rounded-full bg-white/[0.14] px-3 text-[13px] leading-8 font-medium">
+      {text}
+    </span>
   );
 }
 
@@ -126,12 +130,12 @@ function Listening({ view, levels, text }: { view: Extract<PillView, { kind: "li
     <Shell>
       <span
         aria-hidden="true"
-        className="size-[9px] rounded-full bg-live"
+        className="size-[9px] shrink-0 rounded-full bg-live"
         style={{ boxShadow: "0 0 0 4px rgba(255,107,61,0.25)" }}
       />
       <Wave levels={levels} />
       <Words text={text} live={view.live} />
-      <span className="font-mono text-xs text-white/60">{clock(now - view.startedAt)}</span>
+      <span className="shrink-0 font-mono text-xs text-white/60">{clock(now - view.startedAt)}</span>
       <Context text={view.context} />
     </Shell>
   );
@@ -141,10 +145,12 @@ function HandsFree({ view, levels, text }: { view: Extract<PillView, { kind: "ha
   const now = useNow();
   return (
     <Shell tight>
-      <Icon name="lock" size={16} />
+      <span className="flex shrink-0">
+        <Icon name="lock" size={16} />
+      </span>
       <Wave levels={levels} />
       <Words text={text} live={view.live} />
-      <span className="font-mono text-xs text-white/60">
+      <span className="shrink-0 font-mono text-xs text-white/60">
         {clock(Math.min(now - view.startedAt, view.limitMs))} / {clock(view.limitMs)}
       </span>
       <Context text={view.context} />
