@@ -26,6 +26,26 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
 
+#[cfg(not(target_os = "linux"))]
+mod desktop {
+    //! The desktop choices only Linux has; elsewhere there is nothing to set.
+
+    /// What the setup window shows about the desktop: nothing here.
+    pub fn desktop() -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    pub fn bind_shortcut() -> Result<(), String> {
+        Err("this system has no talk shortcut to bind".into())
+    }
+
+    pub fn set_typing(_method: &str) -> Result<(), String> {
+        Err("this system has one way to type".into())
+    }
+}
+#[cfg(not(target_os = "linux"))]
+pub use desktop::*;
+
 /// The system Viary was built for, as the web views name it.
 pub const NAME: &str = if cfg!(target_os = "macos") {
     "macos"

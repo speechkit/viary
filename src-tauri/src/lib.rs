@@ -191,6 +191,8 @@ struct Snapshot {
     pill: PillView,
     /// Dictation paused from the tray.
     paused: Option<pause::Paused>,
+    /// The session, shortcut, and typing method on Linux; null elsewhere.
+    desktop: serde_json::Value,
     autostart: bool,
     /// Each local model's family, as the Voice engine screen describes it.
     families: Vec<(String, engines::FamilyInfo)>,
@@ -219,6 +221,7 @@ fn get_state(app: AppHandle, state: State<'_, App>) -> Snapshot {
         hotkey_name: dictation::key_name(settings.hotkey),
         pill: lock(&state.pill).clone(),
         paused: state.pause.get(),
+        desktop: platform::desktop(),
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         families,
         punct_layout,
@@ -694,6 +697,26 @@ fn set_autostart(app: AppHandle, on: bool) -> CmdResult<()> {
     Ok(())
 }
 
+/// Asks GNOME for the talk shortcut (Linux).
+#[tauri::command]
+async fn bind_shortcut(app: AppHandle) -> CmdResult<()> {
+    let bound = tauri::async_runtime::spawn_blocking(platform::bind_shortcut)
+        .await
+        .map_err(err)?;
+    ui::refresh(&app);
+    bound
+}
+
+/// Chooses how Viary types on Wayland: `portal` or `clipboard` (Linux).
+#[tauri::command]
+async fn set_typing(app: AppHandle, method: String) -> CmdResult<()> {
+    let set = tauri::async_runtime::spawn_blocking(move || platform::set_typing(&method))
+        .await
+        .map_err(err)?;
+    ui::refresh(&app);
+    set
+}
+
 #[tauri::command]
 fn set_key_test(state: State<'_, App>, on: bool) {
     state.key_test.store(on, Ordering::SeqCst);
@@ -1122,8 +1145,9 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
     // Windows: the pill is always there; the main window opens on first run.
     ui::build_pill(&handle)?;
     ui::build_popover(&handle)?;
-    // Windows walks a first-time user through setup in a window of its own.
-    let setting_up = cfg!(target_os = "windows") && !settings.setup_done;
+    // Windows and Linux walk a first-time user through setup in a window
+    // of its own.
+    let setting_up = !cfg!(target_os = "macos") && !settings.setup_done;
     ui::build_main(&handle, first_run && !setting_up)?;
     if setting_up {
         ui::build_setup(&handle)?;
@@ -1189,6 +1213,11 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
     note_recorder::retry_pending(handle.clone());
     let mailbox = dictation::spawn(handle.clone());
     let _ = state.dictation.set(mailbox.clone());
+    #[cfg(target_os = "linux")]
+    {
+        platform::init(&handle, &config_dir);
+        platform::notify::listen(&handle);
+    }
     let keys = handle.clone();
     let listener = HotkeyListener::spawn(settings.hotkey, move |event| {
         let at = Instant::now();
@@ -1196,11 +1225,20 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
             HotkeyEvent::Down => keys.emit("hotkey", "down"),
             HotkeyEvent::Up => keys.emit("hotkey", "up"),
             HotkeyEvent::OtherKey => Ok(()),
+            // A press with no release: the test sees both at once.
+            #[cfg(target_os = "linux")]
+            HotkeyEvent::Toggle => keys.emit("hotkey", "down").and_then(|()| keys.emit("hotkey", "up")),
         }
         .ok();
-        if !keys.state::<App>().key_test.load(Ordering::SeqCst) {
-            let _ = mailbox.send(Msg::Hotkey(event, at));
+        if keys.state::<App>().key_test.load(Ordering::SeqCst) {
+            return;
         }
+        #[cfg(target_os = "linux")]
+        if event == HotkeyEvent::Toggle {
+            let _ = mailbox.send(Msg::Toggle);
+            return;
+        }
+        let _ = mailbox.send(Msg::Hotkey(event, at));
     });
     let _ = state.hotkey.set(listener);
 
@@ -1230,6 +1268,12 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
         });
     }
     Ok(())
+}
+
+/// `viary --toggle`: see `platform::hotkey`.
+#[cfg(target_os = "linux")]
+pub fn send_toggle() -> bool {
+    platform::hotkey::send_toggle()
 }
 
 pub fn run() {
@@ -1264,6 +1308,8 @@ pub fn run() {
             resume_dictation,
             set_autostart,
             set_key_test,
+            bind_shortcut,
+            set_typing,
             finish_setup,
             get_state,
             list_microphones,

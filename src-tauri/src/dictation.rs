@@ -173,6 +173,10 @@ pub enum Msg {
     /// Type the newest dictation into the app in front again.
     #[cfg_attr(target_os = "macos", expect(dead_code, reason = "macOS has no tray menu"))]
     PasteLast,
+    /// A shortcut that reports presses only (GNOME 46): start hands-free,
+    /// or stop and insert.
+    #[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "only GNOME has toggle shortcuts"))]
+    Toggle,
 }
 
 /// A recognition result.
@@ -318,6 +322,13 @@ impl Controller {
                 }
                 Msg::StartHandsFree => self.start_hands_free(),
                 Msg::PasteLast => self.paste_last(),
+                Msg::Toggle => {
+                    if matches!(&self.phase, Phase::Listening(l) if l.hands_free) {
+                        self.key_down(Instant::now());
+                    } else {
+                        self.start_hands_free();
+                    }
+                }
                 Msg::Expire(token) if token == self.token => {
                     if matches!(self.phase, Phase::Inserted(_) | Phase::Notice) {
                         self.phase = Phase::Idle;
@@ -1212,7 +1223,7 @@ pub fn key_name(hotkey: Hotkey) -> &'static str {
         Hotkey::RightCommand => "right ⌘",
         Hotkey::RightAlt => "Right Alt",
         Hotkey::CtrlWin => "Ctrl + Win",
-        Hotkey::Shortcut => "your talk shortcut",
+        Hotkey::Shortcut => "Ctrl+Alt+Space",
     }
 }
 

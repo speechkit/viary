@@ -91,6 +91,11 @@ pub fn refresh(app: &AppHandle) {
 
 pub fn show_pill(app: &AppHandle, view: &PillView) {
     app.state::<App>().set_pill(view.clone());
+    // Wayland has no pill window: results come as notifications.
+    #[cfg(target_os = "linux")]
+    if crate::platform::is_wayland() {
+        crate::platform::notify::pill(view);
+    }
     if let Some(pill) = app.get_webview_window("pill") {
         let _ = pill.set_ignore_cursor_events(!view.interactive());
     }
@@ -235,7 +240,12 @@ pub fn build_setup(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .build()
 }
 
-pub fn build_pill(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+pub fn build_pill(app: &AppHandle) -> tauri::Result<Option<WebviewWindow>> {
+    // Wayland lets no app place a window or keep it above the others.
+    #[cfg(target_os = "linux")]
+    if crate::platform::is_wayland() {
+        return Ok(None);
+    }
     let (width, height) = PILL_SIZE;
     let window = WebviewWindowBuilder::new(app, "pill", WebviewUrl::default())
         .title("Viary dictation")
@@ -261,7 +271,7 @@ pub fn build_pill(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     // Shown once and never hidden: re-showing a window can activate the
     // app and take focus from the field being dictated into.
     let _ = window.show();
-    Ok(window)
+    Ok(Some(window))
 }
 
 /// Fits the pill window around a pill of `width` x `height` (logical
