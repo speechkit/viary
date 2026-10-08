@@ -510,10 +510,11 @@ mod tests {
         let spoken = speak(&input, 35);
         recording.stop();
         let (result, audio) = recording.finish(Duration::from_millis(200));
-        assert!(matches!(
-            result.unwrap_err().error,
-            SpeechError::DeadlineExceeded
-        ));
+        let error = result.unwrap_err().error;
+        assert!(
+            matches!(error, SpeechError::DeadlineExceeded),
+            "expected DeadlineExceeded, got {error:?}"
+        );
         assert_eq!(audio.samples.len(), spoken);
         release.send(()).unwrap();
     }

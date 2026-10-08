@@ -145,7 +145,7 @@ fn microphones() -> Vec<String> {
 }
 
 /// Acts on a menu item.
-pub fn on_event(app: &AppHandle, event: &MenuEvent) {
+pub fn on_event(app: &AppHandle, event: MenuEvent) {
     let state = app.state::<App>();
     let id = event.id().as_ref();
     match id {
