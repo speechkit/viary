@@ -42,7 +42,8 @@ impl Recording {
 
     /// Starts at once; speechkit retains audio while the backend connects.
     /// `on_update` gets the level, the live text when it changed, and
-    /// whether the session has just closed by itself (until key-up only).
+    /// whether the session closed or the listening ended by itself (until
+    /// key-up only).
     pub fn start(
         microphone: &Microphone,
         engine: &AsrEngine,
@@ -50,36 +51,27 @@ impl Recording {
         on_update: impl Fn(f32, Option<String>, bool) + Send + 'static,
     ) -> Result<Self, SpeechError> {
         let mut live = LiveTranscript::new();
-        Self::start_with(
-            microphone,
+        let capture = microphone.capture(CaptureOptions::default())?;
+        Self::observe(
+            &capture,
             engine,
             options,
             MAX_RECORDING,
-            move |level, updates| {
+            None,
+            move |level, updates, ended| {
                 for update in updates {
                     live.apply(update);
                 }
-                let closed = updates.iter().any(|u| matches!(u, AsrUpdate::Closed(_)));
+                let closed = ended || updates.iter().any(|u| matches!(u, AsrUpdate::Closed(_)));
                 on_update(level, (!updates.is_empty()).then(|| live.text()), closed);
             },
         )
     }
 
-    /// Like `start`, for up to `max_length` of audio, with the updates
-    /// received since the last call instead of the joined text.
-    pub fn start_with(
-        microphone: &Microphone,
-        engine: &AsrEngine,
-        options: AsrOptions,
-        max_length: Duration,
-        on_update: impl FnMut(f32, &[AsrUpdate]) + Send + 'static,
-    ) -> Result<Self, SpeechError> {
-        let capture = microphone.capture(CaptureOptions::default())?;
-        Self::listen_on(&capture, engine, options, max_length, None, on_update)
-    }
-
-    /// Like `start_with`, on a capture already running, from capture time
-    /// `start` (which the capture must still hold), or from now.
+    /// Like `start`, on a capture already running, from capture time
+    /// `start` (which the capture must still hold), or from now, for up to
+    /// `max_length` of audio, with the updates received since the last call
+    /// instead of the joined text.
     pub fn listen_on(
         capture: &Capture,
         engine: &AsrEngine,
@@ -87,6 +79,21 @@ impl Recording {
         max_length: Duration,
         start: Option<Duration>,
         mut on_update: impl FnMut(f32, &[AsrUpdate]) + Send + 'static,
+    ) -> Result<Self, SpeechError> {
+        Self::observe(capture, engine, options, max_length, start, move |level, updates, _| {
+            on_update(level, updates);
+        })
+    }
+
+    /// `listen_on`, telling `on_update` too when the listening has ended:
+    /// that call is the last, with every update sent before the end.
+    fn observe(
+        capture: &Capture,
+        engine: &AsrEngine,
+        options: AsrOptions,
+        max_length: Duration,
+        start: Option<Duration>,
+        mut on_update: impl FnMut(f32, &[AsrUpdate], bool) + Send + 'static,
     ) -> Result<Self, SpeechError> {
         // The recording grows only as the engine takes audio, and audio the
         // listening could not hold is gone from it too. Hold as much as the
@@ -112,12 +119,15 @@ impl Recording {
                     if quiet.load(Ordering::Acquire) {
                         break;
                     }
+                    // Read before draining, so that the last call has every
+                    // update sent before the end, its Closed among them.
+                    let ended = listening.end().is_some();
                     batch.clear();
                     while let Ok(update) = updates.try_recv() {
                         batch.push(update);
                     }
-                    on_update(listening.level(), &batch);
-                    if listening.end().is_some() {
+                    on_update(listening.level(), &batch, ended);
+                    if ended {
                         break;
                     }
                     // A failed session closes its updates, but the microphone
@@ -359,6 +369,32 @@ mod tests {
             move |_, _, ended| {
                 if ended {
                     let _ = closed.send(());
+                }
+            },
+        )
+        .unwrap();
+        received.recv_timeout(TIMEOUT).unwrap();
+        recording.stop();
+    }
+
+    #[test]
+    fn the_observer_reports_a_listening_that_ends_while_it_reports() {
+        // The device goes while the observer is in its callback: the next
+        // call must still say so, or hands-free would wait for the limit.
+        let (microphone, input) = Microphone::fake(RATE);
+        let engine = engine(None, false);
+        let (closed, received) = mpsc::channel();
+        let input = std::sync::Mutex::new(Some(input));
+        let recording = Recording::start(
+            &microphone,
+            &engine,
+            AsrOptions::default(),
+            move |_, _, ended| {
+                if ended {
+                    let _ = closed.send(());
+                } else if let Some(input) = input.lock().unwrap().take() {
+                    input.lose();
+                    std::thread::sleep(Duration::from_millis(200));
                 }
             },
         )
