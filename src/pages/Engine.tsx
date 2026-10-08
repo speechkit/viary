@@ -94,7 +94,7 @@ function LocalCard({ s, model, onError }: { s: Snapshot; model: LocalModel; onEr
 }
 
 /** Adds a model folder: detect its layout, and ask for the family only when the files cannot tell. */
-function AddModel({ onError }: { onError: (e: string) => void }) {
+export function AddModel({ onError }: { onError: (e: string) => void }) {
   const [found, setFound] = useState<ModelInspection | null>(null);
   const [family, setFamily] = useState<string>("");
   const [busy, setBusy] = useState(false);

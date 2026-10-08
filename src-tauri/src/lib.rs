@@ -25,7 +25,11 @@ mod ui;
 
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock, mpsc::Sender},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
+    },
     time::{Duration, Instant},
 };
 
@@ -35,6 +39,7 @@ use speechkit::{
     sherpa::Provider as ExecutionProvider,
 };
 use tauri::{AppHandle, Emitter, Manager, State, tray::TrayIconBuilder};
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 use crate::{
@@ -42,7 +47,10 @@ use crate::{
     engines::{EngineInfo, EngineStatus, Engines, ModelInspection},
     history::{Entry, History, Status},
     keychain::Provider,
-    platform::{hotkey::HotkeyListener, permissions},
+    platform::{
+        hotkey::{HotkeyEvent, HotkeyListener},
+        permissions,
+    },
     settings::{
         DashScopeSettings, DictionaryEntry, Hotkey, Language, LocalModel, OpenAiSettings,
         Settings, SettingsStore, Tone,
@@ -63,6 +71,8 @@ pub struct App {
     dictation: OnceLock<Sender<Msg>>,
     hotkey: OnceLock<HotkeyListener>,
     pause: pause::Pause,
+    /// The setup window is testing the talk key: report it, start nothing.
+    key_test: AtomicBool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -181,13 +191,14 @@ struct Snapshot {
     pill: PillView,
     /// Dictation paused from the tray.
     paused: Option<pause::Paused>,
+    autostart: bool,
     /// Each local model's family, as the Voice engine screen describes it.
     families: Vec<(String, engines::FamilyInfo)>,
     punct_layout: Option<String>,
 }
 
 #[tauri::command]
-fn get_state(state: State<'_, App>) -> Snapshot {
+fn get_state(app: AppHandle, state: State<'_, App>) -> Snapshot {
     let settings = state.settings();
     let families = settings
         .local_models
@@ -208,6 +219,7 @@ fn get_state(state: State<'_, App>) -> Snapshot {
         hotkey_name: dictation::key_name(settings.hotkey),
         pill: lock(&state.pill).clone(),
         paused: state.pause.get(),
+        autostart: app.autolaunch().is_enabled().unwrap_or(false),
         families,
         punct_layout,
         speech_caps: caps::current(),
@@ -675,6 +687,30 @@ fn pause_dictation(app: AppHandle, state: State<'_, App>, minutes: Option<u64>) 
 }
 
 #[tauri::command]
+fn set_autostart(app: AppHandle, on: bool) -> CmdResult<()> {
+    let autostart = app.autolaunch();
+    if on { autostart.enable() } else { autostart.disable() }.map_err(err)?;
+    ui::refresh(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_key_test(state: State<'_, App>, on: bool) {
+    state.key_test.store(on, Ordering::SeqCst);
+}
+
+/// Setup ran to its end: it does not open again.
+#[tauri::command]
+fn finish_setup(app: AppHandle, state: State<'_, App>) {
+    state.key_test.store(false, Ordering::SeqCst);
+    state.change(|s| s.setup_done = true);
+    if let Some(setup) = app.get_webview_window("setup") {
+        let _ = setup.close();
+    }
+    ui::refresh(&app);
+}
+
+#[tauri::command]
 fn resume_dictation(app: AppHandle, state: State<'_, App>) {
     state.pause.resume(&app);
 }
@@ -1079,13 +1115,19 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
         dictation: OnceLock::new(),
         hotkey: OnceLock::new(),
         pause: pause::Pause::default(),
+        key_test: AtomicBool::new(false),
     });
     let state = app.state::<App>();
 
     // Windows: the pill is always there; the main window opens on first run.
     ui::build_pill(&handle)?;
     ui::build_popover(&handle)?;
-    ui::build_main(&handle, first_run)?;
+    // Windows walks a first-time user through setup in a window of its own.
+    let setting_up = cfg!(target_os = "windows") && !settings.setup_done;
+    ui::build_main(&handle, first_run && !setting_up)?;
+    if setting_up {
+        ui::build_setup(&handle)?;
+    }
 
     let tray = TrayIconBuilder::with_id(ui::TRAY_ID)
         .icon(ui::tray_icon())
@@ -1147,8 +1189,18 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
     note_recorder::retry_pending(handle.clone());
     let mailbox = dictation::spawn(handle.clone());
     let _ = state.dictation.set(mailbox.clone());
+    let keys = handle.clone();
     let listener = HotkeyListener::spawn(settings.hotkey, move |event| {
-        let _ = mailbox.send(Msg::Hotkey(event, Instant::now()));
+        let at = Instant::now();
+        match event {
+            HotkeyEvent::Down => keys.emit("hotkey", "down"),
+            HotkeyEvent::Up => keys.emit("hotkey", "up"),
+            HotkeyEvent::OtherKey => Ok(()),
+        }
+        .ok();
+        if !keys.state::<App>().key_test.load(Ordering::SeqCst) {
+            let _ = mailbox.send(Msg::Hotkey(event, at));
+        }
     });
     let _ = state.hotkey.set(listener);
 
@@ -1189,6 +1241,10 @@ pub fn run() {
         .init();
     let built = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -1206,6 +1262,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pause_dictation,
             resume_dictation,
+            set_autostart,
+            set_key_test,
+            finish_setup,
             get_state,
             list_microphones,
             inspect_model,

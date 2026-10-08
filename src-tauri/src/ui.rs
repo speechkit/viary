@@ -221,6 +221,20 @@ pub fn build_main(app: &AppHandle, visible: bool) -> tauri::Result<WebviewWindow
     Ok(window)
 }
 
+/// The setup window: its title bar is drawn in the page, as the design has
+/// it. Hidden, not closed, by its close button: setup runs again next time.
+pub fn build_setup(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    WebviewWindowBuilder::new(app, "setup", WebviewUrl::default())
+        .title("Set up Viary")
+        .inner_size(1040.0, 700.0)
+        .resizable(false)
+        .maximizable(false)
+        .decorations(false)
+        .center()
+        .theme(Some(tauri::Theme::Light))
+        .build()
+}
+
 pub fn build_pill(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let (width, height) = PILL_SIZE;
     let window = WebviewWindowBuilder::new(app, "pill", WebviewUrl::default())

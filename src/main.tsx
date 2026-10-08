@@ -13,11 +13,13 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Pill } from "./windows/Pill";
 import { Popover } from "./windows/Popover";
 import { MainWindow } from "./windows/MainWindow";
+import { Setup } from "./windows/Setup";
 
 // One bundle serves every window; the window's label picks the view.
 const label = getCurrentWebviewWindow().label;
 document.documentElement.dataset.window = label;
 
-const view = label === "pill" ? <Pill /> : label === "popover" ? <Popover /> : <MainWindow />;
+const view =
+  label === "pill" ? <Pill /> : label === "popover" ? <Popover /> : label === "setup" ? <Setup /> : <MainWindow />;
 
 createRoot(document.getElementById("root")!).render(<StrictMode>{view}</StrictMode>);

@@ -1,5 +1,5 @@
 // Dev only: renders Viary's windows in a browser against a mocked backend,
-// to compare them with the design. Open /preview.html?w=main|popover|pill.
+// to compare them with the design. Open /preview.html?w=main|popover|pill|setup.
 
 import "@fontsource/geist-sans/400.css";
 import "@fontsource/geist-sans/500.css";
@@ -47,6 +47,8 @@ const HOTKEYS = {
   windows: { hotkey: "rightAlt", name: "Right Alt" },
   linux: { hotkey: "shortcut", name: "Ctrl+Alt+Space" },
 } as const;
+
+const KEY_NAMES = { fn: "fn", rightOption: "right ⌥", rightCommand: "right ⌘", rightAlt: "Right Alt", ctrlWin: "Ctrl + Win", shortcut: "Ctrl+Alt+Space" };
 
 const snapshot: Snapshot = {
   platform: PLATFORM,
@@ -109,6 +111,7 @@ const snapshot: Snapshot = {
   hotkeyName: HOTKEYS[PLATFORM].name,
   pill: { kind: "idle" },
   paused: null,
+  autostart: true,
   families: [
     ["1", { id: "streaming-transducer", label: "Streaming Zipformer", description: "Shows words while you speak. Commits a phrase at each pause.", tags: ["Live preview", "Hotwords"], streaming: true, needsVad: false, nativePunctuation: false }],
     ["2", { id: "sense-voice", label: "SenseVoice", description: "Fast and punctuated. Transcribes each phrase after a pause.", tags: ["5 languages", "Punctuation"], streaming: false, needsVad: true, nativePunctuation: true }],
@@ -544,6 +547,23 @@ mockIPC(
       changed();
       return null;
     }
+    if (cmd === "set_autostart") {
+      snapshot.autostart = a.on as boolean;
+      changed();
+      return null;
+    }
+    if (cmd === "set_key_test") {
+      // ?os=windows&w=setup: a fake press of the talk key while testing it.
+      if (a.on) setTimeout(() => emit("hotkey", "down").then(() => setTimeout(() => emit("hotkey", "up"), 900)), 1500);
+      return null;
+    }
+    if (cmd === "set_preferences") {
+      Object.assign(snapshot.settings, a.prefs as object);
+      const hotkey = (a.prefs as { hotkey?: keyof typeof KEY_NAMES }).hotkey;
+      if (hotkey) snapshot.hotkeyName = KEY_NAMES[hotkey];
+      changed();
+      return null;
+    }
     if (cmd === "history_list") return history;
     if (cmd === "audio_extensions") return ["aac", "flac", "m4a", "mka", "mkv", "mp3", "mp4", "oga", "ogg", "wav"];
     if (cmd.startsWith("note") || cmd === "new_voice_note") return noteCommand(cmd, a);
@@ -605,6 +625,14 @@ async function render() {
         setInterval(() => emit("pill-level", 0.02 + Math.abs(Math.sin(t++ * 0.7)) * 0.12), 60);
       }
     }, 300);
+  } else if (label === "setup") {
+    const { Setup } = await import("./windows/Setup");
+    document.body.style.background = "#CEC8BA";
+    root.render(
+      <div style={{ width: 1040, height: 700, margin: 24, borderRadius: 8, overflow: "hidden", boxShadow: "0 0 0 1px rgba(0,0,0,.12)" }}>
+        <Setup />
+      </div>,
+    );
   } else if (label === "popover") {
     const { Popover } = await import("./windows/Popover");
     document.body.style.background = "#CEC8BA";

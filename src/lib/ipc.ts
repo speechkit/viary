@@ -177,6 +177,8 @@ export interface Snapshot {
   pill: PillView;
   /** Dictation paused from the tray, until a time (ms since the epoch) or until resumed. */
   paused: { until: number | null } | null;
+  /** Viary starts when the user signs in. */
+  autostart: boolean;
   families: [string, FamilyInfo][];
   punctLayout: string | null;
 }
@@ -429,6 +431,11 @@ export const api = {
   /** Pauses dictation for `minutes`, or until resumed. */
   pauseDictation: (minutes: number | null) => invoke<void>("pause_dictation", { minutes }),
   resumeDictation: () => invoke<void>("resume_dictation"),
+  setAutostart: (on: boolean) => invoke<void>("set_autostart", { on }),
+  /** While on, the talk key only reports itself (`hotkey` events) and starts no dictation. */
+  setKeyTest: (on: boolean) => invoke<void>("set_key_test", { on }),
+  /** Closes the setup window for good; Viary goes on in the tray. */
+  finishSetup: () => invoke<void>("finish_setup"),
   quit: () => invoke<void>("quit"),
 };
 
@@ -451,6 +458,16 @@ function useRefreshing<T>(fetch: () => Promise<T>): [T | null, () => void] {
 }
 
 export const useSnapshot = () => useRefreshing(api.state);
+
+/** Calls `onKey` as the talk key goes down and up. */
+export function useHotkey(onKey: (down: boolean) => void) {
+  useEffect(() => {
+    const unlisten = listen<"down" | "up">("hotkey", (e) => onKey(e.payload === "down"));
+    return () => {
+      unlisten.then((stop) => stop());
+    };
+  }, [onKey]);
+}
 export const useHistory = () => useRefreshing(api.history);
 
 /** Calls `fetch` now and on `event` (and window focus, with `onFocus`),

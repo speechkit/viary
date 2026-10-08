@@ -407,6 +407,8 @@ pub struct Settings {
     pub microphone: Option<String>,
     pub language: Language,
     pub hotkey: Hotkey,
+    /// The setup window ran to its end (Windows).
+    pub setup_done: bool,
     /// 0 keeps no recordings.
     pub keep_recordings_days: u32,
     pub openai: OpenAiSettings,
@@ -428,6 +430,7 @@ impl Default for Settings {
             microphone: None,
             language: Language::Auto,
             hotkey: Hotkey::default(),
+            setup_done: false,
             keep_recordings_days: 7,
             openai: OpenAiSettings::default(),
             dashscope: DashScopeSettings::default(),
