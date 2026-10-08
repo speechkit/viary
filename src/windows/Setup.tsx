@@ -8,7 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ErrorBanner, Switch } from "../components/Controls";
 import { Icon, Mark } from "../components/Icons";
 import { AddModel } from "../pages/Engine";
-import { api, errorText, useHotkey, useSnapshot, type Desktop, type Hotkey, type Snapshot, type Typing } from "../lib/ipc";
+import { api, errorText, useHotkey, useMicLevel, useSnapshot, type Desktop, type Hotkey, type Snapshot, type Typing } from "../lib/ipc";
 import { PLATFORM, THIS_COMPUTER } from "../lib/platform";
 
 /** GNOME's look and steps: Ubuntu. Windows otherwise. */
@@ -196,9 +196,6 @@ function MicrophoneStep({ s }: { s: Snapshot }) {
       <Heading step={0} title="Let Viary hear you">
         Viary listens only while you hold your talk key, and keeps no audio unless you ask it to.
       </Heading>
-      {GNOME ? (
-        <span className={sub}>GNOME Settings › Privacy › Microphone turns the microphone off for every app at once.</span>
-      ) : (
       <Status
         ok={allowed}
         title={allowed ? "Desktop apps can use the microphone" : "Windows has the microphone off for desktop apps"}
@@ -215,7 +212,6 @@ function MicrophoneStep({ s }: { s: Snapshot }) {
           )
         }
       />
-      )}
       {allowed && mics.length > 0 && (
         <label className="flex flex-col gap-2">
           <span className="text-[13px] text-faint">Microphone</span>
@@ -232,6 +228,103 @@ function MicrophoneStep({ s }: { s: Snapshot }) {
             ))}
           </select>
         </label>
+      )}
+    </>
+  );
+}
+
+const SEGMENTS = 24;
+
+/** Microphone RMS to 0..1: -60 dB is silence, -15 dB is a raised voice. */
+function loudness(level: number): number {
+  const db = 20 * Math.log10(Math.max(level, 1e-5));
+  return Math.min(1, Math.max(0, (db + 60) / 45));
+}
+
+/** Speech, not room noise: about -35 dB. */
+const SPEECH = 0.55;
+/** How long silence lasts before the step suggests Sound settings. */
+const QUIET_FOR = 6000;
+
+/** The microphone on GNOME: pick the device, and see it hear you. */
+function GnomeMicrophoneStep({ s }: { s: Snapshot }) {
+  const [mics, setMics] = useState<{ name: string; isDefault: boolean }[]>([]);
+  useEffect(() => {
+    api.microphones().then(setMics, () => setMics([]));
+  }, []);
+  const { level, error } = useMicLevel(s.settings.microphone);
+  const [heard, setHeard] = useState(false);
+  const [quiet, setQuiet] = useState(false);
+  const loud = loudness(level);
+  // A new microphone has not been heard yet.
+  useEffect(() => {
+    setHeard(false);
+    setQuiet(false);
+    const timer = setTimeout(() => setQuiet(true), QUIET_FOR);
+    return () => clearTimeout(timer);
+  }, [s.settings.microphone]);
+  useEffect(() => {
+    if (loud >= SPEECH) setHeard(true);
+  }, [loud]);
+  const lit = Math.round(loud * SEGMENTS);
+  return (
+    <>
+      <Heading step={0} title="Let Viary hear you">
+        Viary listens only while you use your talk shortcut, and keeps no audio unless you ask it to.
+      </Heading>
+      <div className={boxed}>
+        <label className={row}>
+          <span className="grow">Microphone</span>
+          <select
+            value={s.settings.microphone ?? ""}
+            onChange={(e) => api.setPreferences({ microphone: e.target.value || null })}
+            className="h-[34px] max-w-[320px] truncate rounded-md bg-black/8 px-3 text-sm font-semibold"
+          >
+            <option value="">Default ({mics.find((m) => m.isDefault)?.name ?? "system"})</option>
+            {mics.map((m) => (
+              <option key={m.name} value={m.name}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className={row + " py-3"}>
+          <div className="flex grow flex-col">
+            <span>Input level</span>
+            <span className={sub}>Say something; the bars should move.</span>
+          </div>
+          <div
+            role="meter"
+            aria-label="Input level"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(loud * 100)}
+            className="flex h-4 items-center gap-[3px]"
+          >
+            {Array.from({ length: SEGMENTS }, (_, i) => (
+              <span key={i} className={"h-4 w-[5px] rounded-sm " + (i < lit ? "bg-[#26734D]" : "bg-black/10")} />
+            ))}
+          </div>
+        </div>
+      </div>
+      {error ? (
+        <div className="rounded-xl bg-[#FDF3D6] px-4 py-3 text-[13px] leading-normal text-[#5C4400]">
+          Viary cannot open this microphone: {error}
+        </div>
+      ) : heard ? (
+        <span role="status" className="flex items-center gap-2 text-sm text-[#26734D]">
+          <Icon name="check" size={18} strokeWidth={2.2} />
+          Viary hears you.
+        </span>
+      ) : (
+        quiet && (
+          <div role="status" className="flex items-center gap-3 rounded-xl bg-[#FDF3D6] px-4 py-3 text-[13px] leading-normal text-[#5C4400]">
+            <span className="grow">No voice yet. Check the input device and its volume in Sound settings.</span>
+            <button type="button" className={btn} onClick={() => api.requestPermission("microphone")}>
+              Sound Settings…
+            </button>
+          </div>
+        )
       )}
     </>
   );
@@ -617,7 +710,7 @@ function TypingStep({ desktop }: { s: Snapshot; desktop: Desktop }) {
 type Body = (props: { s: Snapshot; desktop: Desktop }) => React.ReactNode;
 
 const BODIES: Body[] = GNOME
-  ? [MicrophoneStep, ShortcutStep, TypingStep, EngineStep, TryStep]
+  ? [GnomeMicrophoneStep, ShortcutStep, TypingStep, EngineStep, TryStep]
   : [MicrophoneStep, TalkKeyStep, EngineStep, TrayStep, TryStep];
 
 /** The voice engine step, which may be skipped. */

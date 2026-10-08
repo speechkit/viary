@@ -7,6 +7,7 @@ mod engines;
 mod history;
 mod icons;
 mod json_store;
+mod mic_test;
 mod keychain;
 mod note_recorder;
 mod notes;
@@ -737,6 +738,7 @@ fn set_key_test(state: State<'_, App>, on: bool) {
 #[tauri::command]
 fn finish_setup(app: AppHandle, state: State<'_, App>) {
     state.key_test.store(false, Ordering::SeqCst);
+    mic_test::stop();
     let before = state.settings();
     state.change(|s| {
         s.setup_done = true;
@@ -753,6 +755,15 @@ fn finish_setup(app: AppHandle, state: State<'_, App>) {
         tracing::warn!(%error, "cannot show the tray tip");
     }
     ui::refresh(&app);
+}
+
+/// Starts or ends the setup window's microphone test (`mic-level` events).
+#[tauri::command]
+fn mic_test(app: AppHandle, on: bool) -> CmdResult<()> {
+    if on { mic_test::start(&app) } else {
+        mic_test::stop();
+        Ok(())
+    }
 }
 
 /// Closes the tray tip; `show_me` opens the taskbar settings first.
@@ -1347,6 +1358,7 @@ pub fn run() {
             install_extension,
             finish_setup,
             close_tray_tip,
+            mic_test,
             get_state,
             list_microphones,
             inspect_model,

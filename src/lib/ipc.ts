@@ -451,6 +451,8 @@ export const api = {
   setKeyTest: (on: boolean) => invoke<void>("set_key_test", { on }),
   /** Closes the setup window for good; Viary goes on in the tray. */
   finishSetup: () => invoke<void>("finish_setup"),
+  /** Starts or ends the microphone test, which sends `mic-level` events. */
+  micTest: (on: boolean) => invoke<void>("mic_test", { on }),
   /** Closes the first-launch tray tip; `showMe` opens the taskbar settings (Windows). */
   closeTrayTip: (showMe: boolean) => invoke<void>("close_tray_tip", { showMe }),
   /** Asks GNOME for the talk shortcut (Linux). */
@@ -481,6 +483,23 @@ function useRefreshing<T>(fetch: () => Promise<T>): [T | null, () => void] {
 }
 
 export const useSnapshot = () => useRefreshing(api.state);
+
+/** The microphone's level, 0 to 1, while the test runs: started on mount,
+ *  ended on unmount, and restarted when `microphone` changes. */
+export function useMicLevel(microphone: string | null): { level: number; error: string } {
+  const [level, setLevel] = useState(0);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    setError("");
+    api.micTest(true).catch((e) => setError(errorText(e)));
+    const unlisten = listen<number>("mic-level", (e) => setLevel(e.payload));
+    return () => {
+      unlisten.then((stop) => stop());
+      api.micTest(false).catch(() => {});
+    };
+  }, [microphone]);
+  return { level, error };
+}
 
 /** Calls `onKey` as the talk key goes down and up. */
 export function useHotkey(onKey: (down: boolean) => void) {
