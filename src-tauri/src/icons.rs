@@ -20,9 +20,18 @@ fn rounded_rect(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: f32) -> f32
     outside + qx.max(qy).min(0.0) - r
 }
 
+/// Distance from `(px, py)` to the paused icon's stroke, bottom left to top
+/// right, before its half width.
+fn to_slash(px: f32, py: f32) -> f32 {
+    let (ax, ay, bx, by) = (6.0, 42.0, 42.0, 6.0);
+    let (dx, dy) = (bx - ax, by - ay);
+    let t = (((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+    ((px - ax - t * dx).powi(2) + (py - ay - t * dy).powi(2)).sqrt()
+}
+
 /// An RGBA image `size` pixels square: the mark in `ink`, plus a dot in
-/// `badge` at the top right.
-pub fn tray(size: u32, ink: [u8; 3], badge: Option<[u8; 3]>) -> Vec<u8> {
+/// `badge` at the top right, or struck through when `struck`.
+pub fn tray(size: u32, ink: [u8; 3], badge: Option<[u8; 3]>, struck: bool) -> Vec<u8> {
     let scale = size as f32 / 48.0;
     let mut rgba = vec![0_u8; (size * size * 4) as usize];
     // The dot and the ring cut around it, in mark units.
@@ -42,6 +51,15 @@ pub fn tray(size: u32, ink: [u8; 3], badge: Option<[u8; 3]>) -> Vec<u8> {
                         continue;
                     }
                     if badge.is_some() && to_badge <= br + gap {
+                        continue;
+                    }
+                    // The stroke, 4 units wide, with a 3-unit cut around it.
+                    let slash = to_slash(x, y);
+                    if struck && slash <= 2.0 {
+                        cover_mark += 1.0 / 16.0;
+                        continue;
+                    }
+                    if struck && slash <= 5.0 {
                         continue;
                     }
                     if BARS
@@ -72,15 +90,29 @@ mod tests {
     #[test]
     fn the_middle_bar_is_solid_and_the_corners_clear() {
         let size = 48;
-        let image = tray(size, [0, 0, 0], None);
+        let image = tray(size, [0, 0, 0], None, false);
         let alpha = |x: u32, y: u32| image[((y * size + x) * 4 + 3) as usize];
         assert_eq!(alpha(24, 24), 255);
         assert_eq!(alpha(0, 0), 0);
-        let badged = tray(size, [0, 0, 0], Some([255, 0, 0]));
+        let badged = tray(size, [0, 0, 0], Some([255, 0, 0]), false);
         assert_eq!(
             badged[((8 * size + 40) * 4) as usize],
             255,
             "the badge is red"
         );
+    }
+
+    #[test]
+    fn the_paused_stroke_cuts_through_the_mark() {
+        let size = 48;
+        let alpha = |image: &[u8], x: u32, y: u32| image[((y * size + x) * 4 + 3) as usize];
+        let plain = tray(size, [0, 0, 0], None, false);
+        let struck = tray(size, [0, 0, 0], None, true);
+        // Beside the stroke, on the middle bar: cut away when paused.
+        assert_eq!(alpha(&plain, 26, 26), 255);
+        assert_eq!(alpha(&struck, 26, 26), 0);
+        // On the stroke, off the bars: drawn only when paused.
+        assert_eq!(alpha(&plain, 9, 38), 0);
+        assert_eq!(alpha(&struck, 9, 38), 255);
     }
 }

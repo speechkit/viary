@@ -40,10 +40,14 @@ pub fn check() -> Permissions {
     }
 }
 
-pub fn accessibility() -> bool {
+/// Whether Viary may post ⌘V to other apps: Accessibility.
+pub fn can_type() -> bool {
     // SAFETY: reads TCC state.
     unsafe { AXIsProcessTrusted() }
 }
+
+/// What to allow when [`can_type`] is false.
+pub const ALLOW_TYPING: &str = "Allow Accessibility to paste";
 
 /// Shows the system prompt for `kind`, which adds Viary to the list in
 /// System Settings.

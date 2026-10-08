@@ -52,3 +52,8 @@ pub fn activate(target: &TargetApp) -> bool {
     }
     false
 }
+
+/// Whether the system keeps Viary's keystrokes from `target`: never here.
+pub fn is_protected(_target: &TargetApp) -> bool {
+    false
+}

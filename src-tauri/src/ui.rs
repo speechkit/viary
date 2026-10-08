@@ -1,7 +1,10 @@
 //! Viary's windows and menu bar icon: the pill overlay, the menu bar
 //! popover, and the main window.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU8, Ordering},
+};
 
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow,
@@ -26,6 +29,17 @@ pub enum TrayState {
     Listening,
     Working,
     Failed,
+    /// Idle, with dictation paused from the tray.
+    Paused,
+}
+
+impl From<u8> for TrayState {
+    fn from(code: u8) -> Self {
+        [Self::Idle, Self::Listening, Self::Working, Self::Failed, Self::Paused]
+            .into_iter()
+            .find(|state| *state as u8 == code)
+            .unwrap_or(Self::Idle)
+    }
 }
 
 /// Viary lives in the menu bar, out of the Dock and ⌘Tab. While the main
@@ -70,6 +84,9 @@ pub fn set_app_icon() {
 /// Tells every window to reload what it shows from `get_state`.
 pub fn refresh(app: &AppHandle) {
     let _ = app.emit("state-changed", ());
+    // GNOME shows the menu without asking first: keep it current.
+    #[cfg(target_os = "linux")]
+    crate::tray_menu::refresh(app);
 }
 
 pub fn show_pill(app: &AppHandle, view: &PillView) {
@@ -94,59 +111,104 @@ pub fn open_main(app: &AppHandle, page: &str) {
     }
 }
 
-fn dark_menu_bar() -> bool {
-    std::process::Command::new("defaults")
+/// Whether the bar the icon sits in is dark: the menu bar in Dark Mode, a
+/// Windows taskbar in the dark theme, or GNOME's top bar, which always is.
+fn dark_tray() -> bool {
+    #[cfg(target_os = "macos")]
+    return std::process::Command::new("defaults")
         .args(["read", "-g", "AppleInterfaceStyle"])
         .output()
-        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "Dark")
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "Dark");
+    #[cfg(target_os = "windows")]
+    return crate::platform::dark_taskbar();
+    #[cfg(target_os = "linux")]
+    return true;
 }
 
-static TRAY_STATE: AtomicU8 = AtomicU8::new(u8::MAX);
+/// The icon's color: macOS tints a template itself, so only an icon with a
+/// colored dot needs to know.
+fn tray_ink(template: bool) -> [u8; 3] {
+    if !template && dark_tray() { [0xFF; 3] } else { [0; 3] }
+}
 
-/// The menu bar icon: the plain mark when idle, with a colored dot while
-/// listening (red), working (blue), or failed (amber).
+/// Whether the plain icon is a template image macOS colors for the menu
+/// bar. Elsewhere Viary colors it.
+const TEMPLATE: bool = cfg!(target_os = "macos");
+
+/// The state the dictation last reported, and the one the icon shows.
+static DICTATION: AtomicU8 = AtomicU8::new(TrayState::Idle as u8);
+static SHOWN: AtomicU8 = AtomicU8::new(u8::MAX);
+
+/// The tray icon for the dictation's `state`: the plain mark when idle,
+/// with a colored dot while listening (red), working (blue), or failed
+/// (amber); grayed and struck through while paused.
 pub fn set_tray(app: &AppHandle, state: TrayState) {
-    if TRAY_STATE.swap(state as u8, Ordering::SeqCst) == state as u8 {
+    DICTATION.store(state as u8, Ordering::SeqCst);
+    redraw_tray(app);
+}
+
+/// Draws the icon again, after the dictation or a pause changed.
+pub fn redraw_tray(app: &AppHandle) {
+    let state = TrayState::from(DICTATION.load(Ordering::SeqCst));
+    let paused = app.state::<App>().pause.get();
+    let shown = if state == TrayState::Idle && paused.is_some() {
+        TrayState::Paused
+    } else {
+        state
+    };
+    if SHOWN.swap(shown as u8, Ordering::SeqCst) == shown as u8 && shown != TrayState::Paused {
         return;
     }
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
-    let badge = match state {
-        TrayState::Idle => None,
+    let badge = match shown {
+        TrayState::Idle | TrayState::Paused => None,
         TrayState::Listening => Some([0xE0, 0x45, 0x2B]),
         TrayState::Working => Some([0x2F, 0x46, 0xC8]),
         TrayState::Failed => Some([0xD0, 0x8A, 0x00]),
     };
+    let paused_ink = shown == TrayState::Paused;
     // A template image follows the menu bar's color but loses the dot's.
-    let ink = if badge.is_some() && dark_menu_bar() {
-        [0xFF; 3]
-    } else {
-        [0; 3]
-    };
+    let template = TEMPLATE && badge.is_none();
+    let ink = if paused_ink { [0x8A; 3] } else { tray_ink(template) };
     let size = 44;
     let _ = tray.set_icon(Some(Image::new_owned(
-        icons::tray(size, ink, badge),
+        icons::tray(size, ink, badge, paused_ink),
         size,
         size,
     )));
-    let _ = tray.set_icon_as_template(badge.is_none());
+    let _ = tray.set_icon_as_template(template && !paused_ink);
+    let key = crate::dictation::key_name(app.state::<App>().settings().hotkey);
+    let tip = match shown {
+        TrayState::Idle => format!("Viary: hold {key}"),
+        TrayState::Listening => "Viary: listening".into(),
+        TrayState::Working => "Viary: working".into(),
+        TrayState::Failed => "Viary: needs attention".into(),
+        TrayState::Paused => match paused.and_then(|p| p.until) {
+            Some(_) => "Viary: paused for a while".into(),
+            None => "Viary: paused".into(),
+        },
+    };
+    let _ = tray.set_tooltip(Some(tip));
 }
 
 pub fn tray_icon() -> Image<'static> {
-    Image::new_owned(icons::tray(44, [0; 3], None), 44, 44)
+    Image::new_owned(icons::tray(44, tray_ink(TEMPLATE), None, false), 44, 44)
 }
 
 pub fn build_main(app: &AppHandle, visible: bool) -> tauri::Result<WebviewWindow> {
-    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
         .title("Viary")
         .inner_size(1180.0, 780.0)
         .min_inner_size(960.0, 640.0)
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true)
         .theme(Some(tauri::Theme::Light))
-        .visible(visible)
-        .build()?;
+        .visible(visible);
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true);
+    let window = builder.build()?;
     let handle = window.clone();
     window.on_window_event(move |event| {
         // Closing hides: Viary keeps running in the menu bar.
@@ -204,14 +266,19 @@ pub fn fit_pill(app: &AppHandle, width: f64, height: f64) {
     place_pill(&window, size);
 }
 
-/// Bottom center of the screen with the menu bar, for a window of `size`.
+/// Bottom center of the screen with the menu bar, for a window of `size`:
+/// over the Dock on macOS, above the taskbar or dock elsewhere.
 fn place_pill(window: &WebviewWindow, (width, height): (f64, f64)) {
     let Ok(Some(monitor)) = window.primary_monitor() else {
         return;
     };
     let scale = monitor.scale_factor();
-    let size = monitor.size().to_logical::<f64>(scale);
-    let origin = monitor.position().to_logical::<f64>(scale);
+    #[cfg(target_os = "macos")]
+    let (size, origin) = (monitor.size(), monitor.position());
+    #[cfg(not(target_os = "macos"))]
+    let (size, origin) = (&monitor.work_area().size, &monitor.work_area().position);
+    let size = size.to_logical::<f64>(scale);
+    let origin = origin.to_logical::<f64>(scale);
     let _ = window.set_position(LogicalPosition::new(
         origin.x + (size.width - width) / 2.0,
         origin.y + size.height - height - 24.0,
@@ -257,12 +324,58 @@ pub fn build_popover(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .visible(false)
         .build()?;
     let handle = window.clone();
-    window.on_window_event(move |event| {
-        if let tauri::WindowEvent::Focused(false) = event {
+    window.on_window_event(move |event| match event {
+        tauri::WindowEvent::Focused(false) => {
             let _ = handle.hide();
         }
+        // The popover fits its height to its content; above a taskbar,
+        // its bottom stays put.
+        tauri::WindowEvent::Resized(_) => place_popover(&handle),
+        _ => {}
     });
     Ok(window)
+}
+
+/// The tray icon the popover last opened from, in logical pixels:
+/// `(x, y, width, height)`.
+static POPOVER_ANCHOR: Mutex<Option<(f64, f64, f64, f64)>> = Mutex::new(None);
+
+/// Below the icon in a menu bar or top bar; above it in a taskbar at the
+/// bottom of the screen. Centered on the icon, and kept on its monitor.
+fn place_popover(popover: &WebviewWindow) {
+    let Some((x, y, width, height)) = *crate::lock(&POPOVER_ANCHOR) else {
+        return;
+    };
+    let scale = popover.scale_factor().unwrap_or(1.0);
+    let size = popover
+        .inner_size()
+        .map_or(POPOVER_SIZE.into(), |s| s.to_logical::<f64>(scale));
+    let screen = popover
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|m| {
+            let area = m.work_area();
+            let at = area.position.to_logical::<f64>(scale);
+            let size = area.size.to_logical::<f64>(scale);
+            (at.x, at.y, size.width, size.height)
+        });
+    let left = x + width / 2.0 - size.width / 2.0;
+    let below = y + height + 4.0;
+    let (left, top) = match screen {
+        Some((sx, sy, sw, sh)) => {
+            let left = left.clamp(sx + 8.0, (sx + sw - size.width - 8.0).max(sx + 8.0));
+            // An icon in the lower half sits in a taskbar at the bottom.
+            let top = if y > sy + sh / 2.0 {
+                (y - size.height - 4.0).max(sy)
+            } else {
+                below
+            };
+            (left, top)
+        }
+        None => (left.max(8.0), below),
+    };
+    let _ = popover.set_position(LogicalPosition::new(left, top));
 }
 
 /// Shows the popover under the menu bar icon, or hides it.
@@ -277,12 +390,9 @@ pub fn toggle_popover(app: &AppHandle, icon: tauri::Rect) {
     let scale = popover.scale_factor().unwrap_or(1.0);
     let at = icon.position.to_logical::<f64>(scale);
     let size = icon.size.to_logical::<f64>(scale);
+    *crate::lock(&POPOVER_ANCHOR) = Some((at.x, at.y, size.width, size.height));
     // The popover keeps the height it fitted to its content.
-    let (width, _) = POPOVER_SIZE;
-    let _ = popover.set_position(LogicalPosition::new(
-        (at.x + size.width / 2.0 - width / 2.0).max(8.0),
-        at.y + size.height + 4.0,
-    ));
+    place_popover(&popover);
     refresh(app);
     let _ = popover.show();
     let _ = popover.set_focus();
