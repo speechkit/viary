@@ -7,8 +7,8 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ErrorBanner, Switch } from "../components/Controls";
 import { Icon, Mark } from "../components/Icons";
-import { AddModel } from "../pages/Engine";
-import { api, errorText, useHotkey, useMicLevel, useSnapshot, type Desktop, type Hotkey, type Snapshot, type Typing } from "../lib/ipc";
+import { AddModel, chooseVad, useAddModel } from "../pages/Engine";
+import { api, engineName, errorText, formatBytes, useHotkey, useMicLevel, useSnapshot, type Desktop, type Hotkey, type Snapshot, type Typing } from "../lib/ipc";
 import { PLATFORM, THIS_COMPUTER } from "../lib/platform";
 
 /** GNOME's look and steps: Ubuntu. Windows otherwise. */
@@ -478,6 +478,140 @@ function EngineStep({ s }: { s: Snapshot }) {
   );
 }
 
+/** A GNOME radio: an orange ring when on. */
+function Radio({ on }: { on: boolean }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={"size-[18px] shrink-0 rounded-full " + (on ? "border-[5px] border-[#C34113]" : "border-[1.5px] border-[#B0B0B0]")}
+    />
+  );
+}
+
+/** The voice engine on GNOME: the models added, adding one, the VAD file
+ *  phrase-by-phrase models need, and the cloud, in GNOME's lists. */
+function GnomeEngineStep({ s }: { s: Snapshot }) {
+  const [error, setError] = useState("");
+  const adding = useAddModel(setError);
+  const { active, loading, failed } = s.engine;
+  const chosen = loading ?? failed ?? active?.id ?? null;
+  const family = (id: string) => s.families.find(([model]) => model === id)?.[1];
+  const local = s.settings.localModels.find((m) => `local:${m.id}` === chosen);
+  const needsVad = !!local && !!family(local.id)?.needsVad && !s.settings.vadModel;
+  return (
+    <>
+      <Heading step={3} title="Choose how Viary listens">
+        A speech model on this computer keeps your voice here. Or use OpenAI or DashScope with your own API key.
+      </Heading>
+      <span className="-mb-3 text-[13px] font-bold text-[#5E5E5E]">On this computer</span>
+      <div role="radiogroup" aria-label="Speech model" className={boxed}>
+        {s.settings.localModels.map((m) => {
+          const id = `local:${m.id}`;
+          return (
+            <button
+              key={m.id}
+              type="button"
+              role="radio"
+              aria-checked={chosen === id}
+              onClick={() => api.setActiveEngine(id).catch((e) => setError(errorText(e)))}
+              className={row + " w-full py-3 text-left"}
+            >
+              <Radio on={chosen === id} />
+              <span className="flex min-w-0 grow flex-col">
+                <span className="truncate">{m.name}</span>
+                <span className={sub}>
+                  {family(m.id)?.label ?? m.family} · {formatBytes(m.sizeBytes)}
+                </span>
+              </span>
+            </button>
+          );
+        })}
+        {adding.found ? (
+          <div className={row + " flex-col items-stretch gap-2 py-3"}>
+            <span>
+              {adding.found.name} <span className={sub}>· {formatBytes(adding.found.sizeBytes)}</span>
+            </span>
+            <span className={sub}>The files do not say which kind of model this is; choose one.</span>
+            <div role="radiogroup" aria-label="Model family" className="flex flex-col gap-1">
+              {adding.found.families.map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={adding.family === f.id}
+                  onClick={() => adding.setFamily(f.id)}
+                  className="flex items-center gap-3 py-1 text-left text-sm"
+                >
+                  <Radio on={adding.family === f.id} />
+                  {f.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex justify-end gap-2">
+              <button type="button" className={btn} onClick={adding.cancel}>
+                Cancel
+              </button>
+              <button type="button" className={btnPrimary} disabled={adding.busy} onClick={() => adding.add(adding.found!, adding.family)}>
+                Add and use
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className={row}>
+            <span className="flex grow flex-col">
+              <span>{s.settings.localModels.length ? "Another model" : "A sherpa-onnx model folder"}</span>
+              <span className={sub}>Unpacked from the sherpa-onnx releases. Viary detects its layout.</span>
+            </span>
+            <button type="button" className={btn} disabled={adding.busy} onClick={adding.pick}>
+              Add Folder…
+            </button>
+          </div>
+        )}
+      </div>
+      {needsVad && (
+        <div className="flex items-center gap-3 rounded-xl bg-[#FDF3D6] px-4 py-3 text-[13px] leading-normal text-[#5C4400]">
+          <span className="grow">
+            {local!.name} transcribes phrase by phrase and needs silero_vad.onnx to find the pauses. Viary finds it next
+            to the model folder; otherwise choose it.
+          </span>
+          <button type="button" className={btn} onClick={() => chooseVad(setError)}>
+            Choose File…
+          </button>
+        </div>
+      )}
+      <span className="-mb-3 text-[13px] font-bold text-[#5E5E5E]">Cloud</span>
+      <div className={boxed}>
+        <div className={row}>
+          <span className="flex grow flex-col">
+            <span>OpenAI or DashScope</span>
+            <span className={sub}>With your own API key, kept in the GNOME keyring. Audio goes to the provider.</span>
+          </span>
+          <button type="button" className={btn} onClick={() => api.openMain("engine")}>
+            Set Up…
+          </button>
+        </div>
+      </div>
+      {loading ? (
+        <span role="status" className={sub}>
+          Loading {engineName(s, loading)}… the first load takes a few seconds.
+        </span>
+      ) : failed && s.engine.error ? (
+        <div role="alert" className="rounded-xl bg-[#FBE9E1] px-4 py-3 text-[13px] leading-normal text-[#A33B12]">
+          {engineName(s, failed)} did not load: {s.engine.error}
+        </div>
+      ) : (
+        active && (
+          <span role="status" className="flex items-center gap-2 text-sm text-[#26734D]">
+            <Icon name="check" size={18} strokeWidth={2.2} />
+            Ready: {active.name}
+          </span>
+        )
+      )}
+      <ErrorBanner error={error} onDismiss={() => setError("")} />
+    </>
+  );
+}
+
 function TrayStep({ s }: { s: Snapshot }) {
   const tray = "flex h-10 items-center rounded-md px-2";
   return (
@@ -710,7 +844,7 @@ function TypingStep({ desktop }: { s: Snapshot; desktop: Desktop }) {
 type Body = (props: { s: Snapshot; desktop: Desktop }) => React.ReactNode;
 
 const BODIES: Body[] = GNOME
-  ? [GnomeMicrophoneStep, ShortcutStep, TypingStep, EngineStep, TryStep]
+  ? [GnomeMicrophoneStep, ShortcutStep, TypingStep, GnomeEngineStep, TryStep]
   : [MicrophoneStep, TalkKeyStep, EngineStep, TrayStep, TryStep];
 
 /** The voice engine step, which may be skipped. */
