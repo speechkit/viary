@@ -42,6 +42,14 @@ use crate::{
 
 /// A key press shorter than this is a tap, not a dictation.
 const MIN_HOLD: Duration = Duration::from_millis(350);
+/// A second tap pressed this soon after the first one is released starts
+/// hands-free dictation.
+const DOUBLE_TAP: Duration = Duration::from_millis(400);
+/// A hands-free dictation stops by itself after this long.
+const HANDS_FREE_FOR: Duration = Duration::from_secs(5 * 60);
+/// How long recognition may take to finish after the input stops, at least.
+/// A longer recording gets as long as it ran, for an engine that fell behind.
+const FINISH_FOR: Duration = Duration::from_secs(90);
 /// How long "Inserted" stays up with its Undo button.
 const INSERTED_FOR: Duration = Duration::from_secs(3);
 const HINT_FOR: Duration = Duration::from_millis(2200);
@@ -59,6 +67,20 @@ pub enum PillView {
         /// Milliseconds since the epoch, for the clock.
         started_at: u64,
         /// The app, and "Cloud" for cloud engines.
+        context: String,
+        /// Whether words appear while speaking.
+        live: bool,
+    },
+    /// Listening after a double tap, until the next tap, Stop, or the limit.
+    #[serde(rename_all = "camelCase")]
+    HandsFree {
+        /// The dictation, as in `Listening`.
+        token: u64,
+        /// Milliseconds since the epoch, for the clock.
+        started_at: u64,
+        /// The longest it runs, in milliseconds.
+        limit_ms: u64,
+        /// The app and "Cloud", as while holding the key.
         context: String,
         /// Whether words appear while speaking.
         live: bool,
@@ -94,12 +116,15 @@ pub enum PillView {
 impl PillView {
     /// Whether the pill has buttons, and so must take clicks.
     pub fn interactive(&self) -> bool {
-        matches!(self, Self::Polishing | Self::Inserted { .. } | Self::Failed { .. })
+        matches!(
+            self,
+            Self::HandsFree { .. } | Self::Polishing | Self::Inserted { .. } | Self::Failed { .. }
+        )
     }
 
     fn tray(&self) -> TrayState {
         match self {
-            Self::Listening { .. } => TrayState::Listening,
+            Self::Listening { .. } | Self::HandsFree { .. } => TrayState::Listening,
             Self::Transcribing { .. } | Self::Polishing => TrayState::Working,
             Self::Failed { .. } => TrayState::Failed,
             _ => TrayState::Idle,
@@ -118,11 +143,21 @@ pub enum PillAction {
     Dismiss,
     /// Stop waiting for the polish model and insert the text as recognized.
     SkipPolish,
+    /// End a hands-free dictation and insert it.
+    Stop,
 }
 
 pub enum Msg {
-    Hotkey(HotkeyEvent),
+    /// A hotkey event, and when the listener saw it.
+    Hotkey(HotkeyEvent, Instant),
     Pill(PillAction),
+    /// A single short tap of `token`'s dictation: unless a second tap
+    /// follows in time, say how to dictate.
+    Tapped(u64),
+    /// The session of `token`'s dictation closed by itself.
+    Closed(u64),
+    /// `token`'s hands-free dictation reached its limit.
+    HandsFreeLimit(u64),
     /// Recognition for `token` ended.
     Finished(u64, Transcribed),
     /// The polish model rewrote the text of `token`, or gave up.
@@ -170,9 +205,18 @@ struct Job {
 struct Listening {
     recording: Recording,
     engine: Arc<LoadedEngine>,
+    /// When the key was first pressed: what the limit and deadline count from.
     started: Instant,
     started_ms: u64,
+    /// When the key was last pressed: a double tap's second press.
+    pressed: Instant,
     target: TargetApp,
+    /// Pressed soon after a tap: released quickly, it goes hands-free.
+    second_tap: bool,
+    /// Started by a double tap: the next press ends it, not key-up.
+    hands_free: bool,
+    /// The session closed by itself, as a failed one does.
+    closed: bool,
 }
 
 /// The last insertion, for Undo and Use raw.
@@ -185,6 +229,10 @@ struct Inserted {
 enum Phase {
     Idle,
     Listening(Box<Listening>),
+    /// Released after a tap at the instant given: the recording goes on in
+    /// case a second tap follows, which continues it instead of starting
+    /// another session.
+    Tapped(Box<Listening>, Instant),
     Busy(Job),
     /// Waiting for the polish model.
     Polishing(Box<Polishing>),
@@ -239,10 +287,23 @@ impl Controller {
     fn run(mut self, receiver: &Receiver<Msg>) {
         while let Ok(msg) = receiver.recv() {
             match msg {
-                Msg::Hotkey(HotkeyEvent::Down) => self.key_down(),
-                Msg::Hotkey(HotkeyEvent::Up) => self.key_up(),
-                Msg::Hotkey(HotkeyEvent::OtherKey) => self.other_key(),
+                Msg::Hotkey(HotkeyEvent::Down, at) => self.key_down(at),
+                Msg::Hotkey(HotkeyEvent::Up, at) => self.key_up(at),
+                Msg::Hotkey(HotkeyEvent::OtherKey, at) => self.other_key(at),
                 Msg::Pill(action) => self.pill(action),
+                Msg::Tapped(token) if token == self.token => {
+                    // No second tap: drop the recording and say how to dictate.
+                    if matches!(self.phase, Phase::Tapped(..)) {
+                        let key = key_name(self.settings().hotkey);
+                        self.hint(format!("Hold {key} to dictate, or double-tap it"));
+                    }
+                }
+                Msg::Closed(token) if token == self.token => self.closed(),
+                Msg::HandsFreeLimit(token) if token == self.token => {
+                    if matches!(&self.phase, Phase::Listening(l) if l.hands_free) {
+                        self.stop_listening();
+                    }
+                }
                 Msg::Finished(token, done) if token == self.token => self.finished(done),
                 Msg::Polished(token, polished) if token == self.token => self.polished(polished),
                 Msg::Switched(token, id, outcome) if token == self.token => {
@@ -269,13 +330,18 @@ impl Controller {
         ui::show_pill(&self.app, &view);
     }
 
-    /// Sends `Expire` for the current token after `after`.
-    fn expire_after(&self, after: Duration) {
-        let (mailbox, token) = (self.mailbox.clone(), self.token);
+    /// Sends `msg` to the controller after `after`.
+    fn send_after(&self, after: Duration, msg: Msg) {
+        let mailbox = self.mailbox.clone();
         std::thread::spawn(move || {
             std::thread::sleep(after);
-            let _ = mailbox.send(Msg::Expire(token));
+            let _ = mailbox.send(msg);
         });
+    }
+
+    /// Sends `Expire` for the current token after `after`.
+    fn expire_after(&self, after: Duration) {
+        self.send_after(after, Msg::Expire(self.token));
     }
 
     fn hint(&mut self, text: impl Into<String>) {
@@ -288,12 +354,35 @@ impl Controller {
     // -----------------------------------------------------------------
     // Recording
 
-    fn key_down(&mut self) {
-        if matches!(
-            self.phase,
-            Phase::Listening(_) | Phase::Busy(_) | Phase::Polishing(_)
-        ) {
-            return;
+    fn key_down(&mut self, at: Instant) {
+        match std::mem::replace(&mut self.phase, Phase::Idle) {
+            // Toggle-to-talk: the press after a double tap ends the
+            // dictation; its key-up then finds nothing to do.
+            Phase::Listening(listening) if listening.hands_free => {
+                self.phase = Phase::Listening(listening);
+                self.stop_listening();
+                return;
+            }
+            // A second tap goes on with the first one's recording.
+            Phase::Tapped(mut listening, released) if is_second_tap(released, at) => {
+                listening.pressed = at;
+                listening.second_tap = true;
+                self.show(PillView::Listening {
+                    token: self.token,
+                    started_at: listening.started_ms,
+                    context: context(&listening.target, &listening.engine.info),
+                    live: listening.engine.info.live,
+                });
+                self.phase = Phase::Listening(listening);
+                return;
+            }
+            // Too late for a double tap: a new dictation instead.
+            Phase::Tapped(..) => {}
+            phase @ (Phase::Listening(_) | Phase::Busy(_) | Phase::Polishing(_)) => {
+                self.phase = phase;
+                return;
+            }
+            phase => self.phase = phase,
         }
         let token = self.next_token();
         let settings = self.settings();
@@ -317,15 +406,18 @@ impl Controller {
             }
         };
         let options = engine.session_options(&settings, &target.name);
-        let app = self.app.clone();
+        let (app, mailbox) = (self.app.clone(), self.mailbox.clone());
         let recording = match Recording::start(
             &microphone,
             &engine.engine,
             options,
-            move |level, text| {
+            move |level, text, closed| {
                 let _ = app.emit_to("pill", "pill-level", level);
                 if let Some(text) = text {
                     let _ = app.emit_to("pill", "pill-partial", (token, text));
+                }
+                if closed {
+                    let _ = mailbox.send(Msg::Closed(token));
                 }
             },
         ) {
@@ -355,16 +447,20 @@ impl Controller {
         self.phase = Phase::Listening(Box::new(Listening {
             recording,
             engine,
-            started: Instant::now(),
+            started: at,
             started_ms,
+            pressed: at,
             target,
+            second_tap: false,
+            hands_free: false,
+            closed: false,
         }));
     }
 
-    fn other_key(&mut self) {
+    fn other_key(&mut self, at: Instant) {
         // fn+arrow and similar shortcuts: drop a dictation that just began.
         if let Phase::Listening(listening) = &self.phase
-            && listening.started.elapsed() < Duration::from_millis(600)
+            && at.saturating_duration_since(listening.pressed) < Duration::from_millis(600)
         {
             self.next_token();
             self.phase = Phase::Idle;
@@ -372,23 +468,80 @@ impl Controller {
         }
     }
 
-    fn key_up(&mut self) {
+    fn key_up(&mut self, at: Instant) {
+        let Phase::Listening(listening) = &self.phase else {
+            return;
+        };
+        if listening.hands_free {
+            return;
+        }
+        match release(at.saturating_duration_since(listening.pressed), listening.second_tap) {
+            Release::Insert => self.stop_listening(),
+            Release::HandsFree => self.hands_free(),
+            Release::Tap => {
+                // Maybe the first of two: keep listening, out of sight, for
+                // a moment before the hint.
+                let Phase::Listening(listening) = std::mem::replace(&mut self.phase, Phase::Idle)
+                else {
+                    return;
+                };
+                self.show(PillView::Idle);
+                self.phase = Phase::Tapped(listening, at);
+                self.send_after(DOUBLE_TAP, Msg::Tapped(self.token));
+            }
+        }
+    }
+
+    /// Keeps listening after a double tap until the next press, Stop, the
+    /// session closing, or the limit.
+    fn hands_free(&mut self) {
+        let Phase::Listening(listening) = &mut self.phase else {
+            return;
+        };
+        if listening.closed {
+            self.stop_listening();
+            return;
+        }
+        listening.hands_free = true;
+        let left = HANDS_FREE_FOR.saturating_sub(listening.started.elapsed());
+        let view = PillView::HandsFree {
+            token: self.token,
+            started_at: listening.started_ms,
+            limit_ms: u64::try_from(HANDS_FREE_FOR.as_millis()).unwrap_or(u64::MAX),
+            context: context(&listening.target, &listening.engine.info),
+            live: listening.engine.info.live,
+        };
+        self.show(view);
+        self.send_after(left, Msg::HandsFreeLimit(self.token));
+    }
+
+    /// The session ended by itself. Hands-free has no key-up to wait for,
+    /// so it finishes now; holding the key, key-up still does.
+    fn closed(&mut self) {
+        let listening = match &mut self.phase {
+            Phase::Listening(listening) | Phase::Tapped(listening, _) => listening,
+            _ => return,
+        };
+        listening.closed = true;
+        if listening.hands_free {
+            self.stop_listening();
+        }
+    }
+
+    /// Stops the input and finishes recognition on a worker thread.
+    fn stop_listening(&mut self) {
         let Phase::Listening(listening) = std::mem::replace(&mut self.phase, Phase::Idle) else {
             return;
         };
-        if listening.started.elapsed() < MIN_HOLD {
-            drop(listening);
-            let key = key_name(self.settings().hotkey);
-            self.hint(format!("Hold {key} while you speak"));
-            return;
-        }
         let Listening {
             recording,
             engine,
+            started,
             started_ms,
             target,
             ..
         } = *listening;
+        let deadline = finish_deadline(started.elapsed());
         recording.stop();
         let token = self.token;
         self.show(PillView::Transcribing {
@@ -404,7 +557,7 @@ impl Controller {
         });
         let mailbox = self.mailbox.clone();
         std::thread::spawn(move || {
-            let (outcome, audio) = recording.finish(Duration::from_secs(90));
+            let (outcome, audio) = recording.finish(deadline);
             let audio = Arc::new(audio);
             let result = outcome.map_err(|failure| failure.error);
             let engine = Some(engine);
@@ -676,6 +829,13 @@ impl Controller {
                 let Polishing { job, text, raw, info } = *waiting;
                 self.insert(job, text, raw, info.as_ref(), Some("not polished"));
             }
+            (PillAction::Stop, phase @ Phase::Listening(_)) => {
+                let hands_free = matches!(&phase, Phase::Listening(l) if l.hands_free);
+                self.phase = phase;
+                if hands_free {
+                    self.stop_listening();
+                }
+            }
             (PillAction::Dismiss, Phase::Failed { .. }) => {
                 self.next_token();
                 self.show(PillView::Idle);
@@ -866,6 +1026,39 @@ pub fn finish(
     fix(&text)
 }
 
+/// What letting go of the key does.
+#[derive(Debug, PartialEq, Eq)]
+enum Release {
+    /// It was held: stop and insert.
+    Insert,
+    /// A double tap's second tap: keep listening.
+    HandsFree,
+    /// A single tap, maybe the first of two.
+    Tap,
+}
+
+/// What a key-up does after a press `held` long.
+fn release(held: Duration, second_tap: bool) -> Release {
+    if held >= MIN_HOLD {
+        Release::Insert
+    } else if second_tap {
+        Release::HandsFree
+    } else {
+        Release::Tap
+    }
+}
+
+/// Whether a press at `pressed` follows a tap released at `released`
+/// closely enough to make a double tap.
+fn is_second_tap(released: Instant, pressed: Instant) -> bool {
+    pressed.saturating_duration_since(released) < DOUBLE_TAP
+}
+
+/// How long to wait for recognition after `recorded` of input.
+fn finish_deadline(recorded: Duration) -> Duration {
+    FINISH_FOR.max(recorded)
+}
+
 fn context(target: &TargetApp, info: &EngineInfo) -> String {
     let mut parts = Vec::new();
     if !target.name.is_empty() && !target.is_self() {
@@ -990,6 +1183,34 @@ mod tests {
                 .collect(),
             Duration::from_secs(parts.len() as u64),
         )
+    }
+
+    #[test]
+    fn a_held_key_inserts_whether_or_not_it_followed_a_tap() {
+        assert_eq!(release(MIN_HOLD, false), Release::Insert);
+        assert_eq!(release(Duration::from_secs(4), true), Release::Insert);
+    }
+
+    #[test]
+    fn a_quick_second_tap_goes_hands_free_and_a_first_one_waits() {
+        let quick = MIN_HOLD - Duration::from_millis(1);
+        assert_eq!(release(quick, true), Release::HandsFree);
+        assert_eq!(release(quick, false), Release::Tap);
+    }
+
+    #[test]
+    fn a_double_tap_counts_from_release_to_the_next_press() {
+        let released = Instant::now();
+        assert!(is_second_tap(released, released + DOUBLE_TAP - Duration::from_millis(1)));
+        assert!(!is_second_tap(released, released + DOUBLE_TAP));
+        // An event stamped before the release, as by a lagging listener.
+        assert!(is_second_tap(released + Duration::from_millis(5), released));
+    }
+
+    #[test]
+    fn a_long_recording_gets_as_long_to_finish_as_it_ran() {
+        assert_eq!(finish_deadline(Duration::from_secs(3)), FINISH_FOR);
+        assert_eq!(finish_deadline(HANDS_FREE_FOR), HANDS_FREE_FOR);
     }
 
     #[test]

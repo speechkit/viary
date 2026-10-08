@@ -141,6 +141,7 @@ export interface ModelInspection {
 export type PillView =
   | { kind: "idle" }
   | { kind: "listening"; token: number; startedAt: number; context: string; live: boolean }
+  | { kind: "handsFree"; token: number; startedAt: number; limitMs: number; context: string; live: boolean }
   | { kind: "transcribing"; label: string }
   | { kind: "polishing" }
   | { kind: "inserted"; label: string; canRaw: boolean }
@@ -148,7 +149,7 @@ export type PillView =
   | { kind: "failed"; message: string; detail: string; retryable: boolean; alternative: string | null }
   | { kind: "hint"; text: string };
 
-export type PillAction = "undo" | "useRaw" | "retry" | "switchEngine" | "dismiss" | "skipPolish";
+export type PillAction = "undo" | "useRaw" | "retry" | "switchEngine" | "dismiss" | "skipPolish" | "stop";
 
 /**
  * What recognition can tell beyond passage text and times. speechkit 0.5

@@ -556,12 +556,13 @@ mockIPC(
 const pills: Record<string, PillView> = {
   idle: { kind: "idle" },
   listening: { kind: "listening", token: 1, startedAt: now - 4000, context: "Mail", live: true },
+  handsFree: { kind: "handsFree", token: 1, startedAt: now - 102_000, limitMs: 300_000, context: "Notes", live: true },
   transcribing: { kind: "transcribing", label: "Transcribing" },
   polishing: { kind: "polishing" },
   inserted: { kind: "inserted", label: "38 words", canRaw: true },
   copied: { kind: "copied", label: "No text field focused · copied to clipboard", hint: "⌘V to paste" },
   failed: { kind: "failed", message: "Connection lost · audio kept", detail: "", retryable: true, alternative: "Use on-device" },
-  hint: { kind: "hint", text: "Hold fn while you speak" },
+  hint: { kind: "hint", text: "Hold fn to dictate, or double-tap it" },
 };
 
 async function render() {
@@ -577,7 +578,7 @@ async function render() {
     const view = pills[params.get("state") ?? "listening"];
     setTimeout(() => {
       emit("pill-state", view);
-      if (view.kind === "listening") {
+      if (view.kind === "listening" || view.kind === "handsFree") {
         emit("pill-partial", [1, "so the plan is to ship on Thursday"]);
         let t = 0;
         setInterval(() => emit("pill-level", 0.02 + Math.abs(Math.sin(t++ * 0.7)) * 0.12), 60);

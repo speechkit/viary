@@ -41,12 +41,13 @@ impl Recording {
     }
 
     /// Starts at once; speechkit retains audio while the backend connects.
-    /// `on_update` gets the level and, when it changed, the live text.
+    /// `on_update` gets the level, the live text when it changed, and
+    /// whether the session has just closed by itself (until key-up only).
     pub fn start(
         microphone: &Microphone,
         engine: &AsrEngine,
         options: AsrOptions,
-        on_update: impl Fn(f32, Option<String>) + Send + 'static,
+        on_update: impl Fn(f32, Option<String>, bool) + Send + 'static,
     ) -> Result<Self, SpeechError> {
         let mut live = LiveTranscript::new();
         Self::start_with(
@@ -58,7 +59,8 @@ impl Recording {
                 for update in updates {
                     live.apply(update);
                 }
-                on_update(level, (!updates.is_empty()).then(|| live.text()));
+                let closed = updates.iter().any(|u| matches!(u, AsrUpdate::Closed(_)));
+                on_update(level, (!updates.is_empty()).then(|| live.text()), closed);
             },
         )
     }
@@ -298,7 +300,7 @@ mod tests {
         let (release, gate) = mpsc::channel();
         let engine = engine(Some(gate), false);
         let recording =
-            Recording::start(&microphone, &engine, AsrOptions::default(), |_, _| {}).unwrap();
+            Recording::start(&microphone, &engine, AsrOptions::default(), |_, _, _| {}).unwrap();
         let samples = vec![0.25; 1600];
         input.push(&samples);
         wait_recorded(&recording, samples.len());
@@ -319,7 +321,7 @@ mod tests {
             &microphone,
             &engine,
             AsrOptions::default(),
-            move |level, _| {
+            move |level, _, _| {
                 let _ = levels.send(level);
             },
         )
@@ -345,6 +347,27 @@ mod tests {
     }
 
     #[test]
+    fn the_observer_reports_a_session_that_closed_by_itself() {
+        // Hands-free has no key-up, so this is what ends it after a failure.
+        let (microphone, _) = Microphone::fake(RATE);
+        let engine = engine(None, true);
+        let (closed, received) = mpsc::channel();
+        let recording = Recording::start(
+            &microphone,
+            &engine,
+            AsrOptions::default(),
+            move |_, _, ended| {
+                if ended {
+                    let _ = closed.send(());
+                }
+            },
+        )
+        .unwrap();
+        received.recv_timeout(TIMEOUT).unwrap();
+        recording.stop();
+    }
+
+    #[test]
     fn one_observer_reports_live_text_and_input_level() {
         let (microphone, input) = Microphone::fake(RATE);
         let engine = engine(None, false);
@@ -353,7 +376,7 @@ mod tests {
             &microphone,
             &engine,
             AsrOptions::default(),
-            move |level, text| {
+            move |level, text, _| {
                 let _ = updates.send((level, text));
             },
         )
@@ -379,7 +402,7 @@ mod tests {
         let (microphone, _) = Microphone::fake(RATE);
         let engine = engine(None, false);
         let recording =
-            Recording::start(&microphone, &engine, AsrOptions::default(), |_, _| {}).unwrap();
+            Recording::start(&microphone, &engine, AsrOptions::default(), |_, _, _| {}).unwrap();
         let mut updates = recording.listening.updates();
         drop(recording);
         assert!(matches!(
@@ -393,7 +416,7 @@ mod tests {
         let (microphone, input) = Microphone::fake(RATE);
         let failed = engine(None, true);
         let recording =
-            Recording::start(&microphone, &failed, AsrOptions::default(), |_, _| {}).unwrap();
+            Recording::start(&microphone, &failed, AsrOptions::default(), |_, _, _| {}).unwrap();
         input.push(&vec![0.25; 1600]);
         wait_recorded(&recording, 1600);
         let (result, audio) = recording.finish(TIMEOUT);
@@ -423,7 +446,7 @@ mod tests {
         let (release, gate) = mpsc::channel();
         let engine = engine(Some(gate), false);
         let recording =
-            Recording::start(&microphone, &engine, AsrOptions::default(), |_, _| {}).unwrap();
+            Recording::start(&microphone, &engine, AsrOptions::default(), |_, _, _| {}).unwrap();
         // The backend never finishes opening, so at the deadline the listening
         // still holds audio the session was not given: more than the session's
         // 2 s input queue.
@@ -444,7 +467,7 @@ mod tests {
         let (release, gate) = mpsc::channel();
         let engine = engine(Some(gate), false);
         let recording =
-            Recording::start(&microphone, &engine, AsrOptions::default(), |_, _| {}).unwrap();
+            Recording::start(&microphone, &engine, AsrOptions::default(), |_, _, _| {}).unwrap();
         // 35 s with the engine stuck: past the 30 s a listening holds by
         // default, after which it would fail with `Capacity` and drop what it
         // had not read, leaving only the first seconds for Retry.
@@ -521,7 +544,7 @@ mod tests {
         let reports = Arc::new(AtomicUsize::new(0));
         let counted = reports.clone();
         let recording =
-            Recording::start(&microphone, &engine, AsrOptions::default(), move |_, _| {
+            Recording::start(&microphone, &engine, AsrOptions::default(), move |_, _, _| {
                 counted.fetch_add(1, Ordering::SeqCst);
             })
             .unwrap();

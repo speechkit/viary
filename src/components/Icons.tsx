@@ -74,6 +74,7 @@ const paths = {
   flag: "M5 21V4h11l-2 4 2 4H5",
   more: "M5 12h.01M12 12h.01M19 12h.01",
   pen: "M4 20h4L19 9l-4-4L4 16v4z",
+  lock: "M6 11h12v10H6zM8 11V7a4 4 0 0 1 8 0v4",
 } as const;
 
 export type IconName = keyof typeof paths;

@@ -30,6 +30,8 @@ function status(s: Snapshot): Status {
   switch (s.pill.kind) {
     case "listening":
       return { label: "Listening", tone: "live", hint: "Release to insert" };
+    case "handsFree":
+      return { label: "Listening", tone: "live", hint: `Hands-free · tap ${s.hotkeyName} to insert` };
     case "transcribing":
       return { label: "Transcribing", tone: "busy", hint: hold };
     case "polishing":

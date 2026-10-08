@@ -1109,7 +1109,7 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
     let mailbox = dictation::spawn(handle.clone());
     let _ = state.dictation.set(mailbox.clone());
     let listener = HotkeyListener::spawn(settings.hotkey, move |event| {
-        let _ = mailbox.send(Msg::Hotkey(event));
+        let _ = mailbox.send(Msg::Hotkey(event, Instant::now()));
     });
     let _ = state.hotkey.set(listener);
 

@@ -70,7 +70,7 @@ export function SettingsPage({ s }: { s: Snapshot }) {
           );
         })}
       </div>
-      <span className="text-[13px] text-muted">Hold the key while you speak and release it to insert. A quick tap does nothing.</span>
+      <span className="text-[13px] text-muted">Hold the key while you speak and release it to insert. Double-tap it for hands-free: Viary listens until you tap it again.</span>
 
       <h2 className="m-0 text-xs font-semibold tracking-[.04em] text-faint uppercase">Permissions</h2>
       <div className="overflow-hidden rounded-[14px] border border-line bg-white">
