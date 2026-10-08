@@ -57,8 +57,11 @@ function LocalCard({ s, model, onError }: { s: Snapshot; model: LocalModel; onEr
         aria-label={`Use ${model.name}`}
       />
       <div className="pointer-events-none flex items-center justify-between gap-2">
-        <span className="truncate text-[15px] font-semibold" title={model.path}>
-          {model.name}
+        <span className="flex min-w-0 flex-col">
+          <span className="truncate text-[15px] font-semibold">{family?.label ?? model.family}</span>
+          <span className="truncate font-mono text-[11px] text-faint" title={model.path}>
+            {model.name}
+          </span>
         </span>
         <span
           className="size-[18px] shrink-0 rounded-full"
@@ -66,7 +69,7 @@ function LocalCard({ s, model, onError }: { s: Snapshot; model: LocalModel; onEr
         />
       </div>
       <span className="pointer-events-none text-[13px] leading-[1.45] text-muted">
-        <b className="font-medium text-ink">{family?.label ?? model.family}.</b> {family?.description}
+        {family?.description}
       </span>
       <div className="pointer-events-none flex flex-wrap gap-1.5">
         {tags.map((t) => (
