@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon, Kbd } from "../components/Icons";
 import { api, useHistory, type Snapshot } from "../lib/ipc";
+import { isMac, PLATFORM, SYSTEM_SETTINGS, THIS_COMPUTER } from "../lib/platform";
 
 /** An average typing speed, for the time saved; Viary does not measure yours. */
 const TYPING_WPM = 40;
@@ -89,7 +90,13 @@ export function HomePage({ s, go }: { s: Snapshot; go: Go }) {
   const seconds = week.reduce((sum, h) => sum + h.durationMs, 0) / 1000;
   const wpm = seconds > 5 ? Math.round(words / (seconds / 60)) : null;
   const saved = Math.max(0, Math.round(words / TYPING_WPM - seconds / 60));
-  const setupDone = !!s.engine.active && s.permissions.inputMonitoring && s.permissions.accessibility;
+  // Windows needs nothing but the microphone switch; macOS needs the key
+  // watched and permission to type.
+  const allowed =
+    PLATFORM === "windows"
+      ? s.permissions.microphone !== false
+      : (s.permissions.inputMonitoring || s.hotkeyActive) && s.permissions.accessibility;
+  const setupDone = !!s.engine.active && allowed;
   const today = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
 
   return (
@@ -114,7 +121,7 @@ export function HomePage({ s, go }: { s: Snapshot; go: Go }) {
           title="Double-tap for hands-free"
           text="Keeps listening until you tap again."
         />
-        <Shortcut keys={[s.hotkeyName, "⇧"]} title="Speak to edit" text="Select text, then say how to change it." soon />
+        <Shortcut keys={[s.hotkeyName, isMac ? "⇧" : "Shift"]} title="Speak to edit" text="Select text, then say how to change it." soon />
       </div>
 
       {!setupDone && (
@@ -123,33 +130,48 @@ export function HomePage({ s, go }: { s: Snapshot; go: Go }) {
           <Step
             done={!!s.engine.active}
             title="Choose a voice engine"
-            text="A sherpa-onnx model folder on this Mac, or OpenAI or DashScope with your key."
+            text={`A sherpa-onnx model folder on ${THIS_COMPUTER}, or OpenAI or DashScope with your key.`}
             action={
               <button type="button" className={btn} onClick={() => go("engine")}>
                 Voice engine
               </button>
             }
           />
-          <Step
-            done={s.permissions.inputMonitoring || s.hotkeyActive}
-            title={`Let Viary notice the ${s.hotkeyName} key`}
-            text="Input Monitoring. Viary only watches the dictation key."
-            action={
-              <button type="button" className={btn} onClick={() => api.requestPermission("inputMonitoring")}>
-                Allow…
-              </button>
-            }
-          />
-          <Step
-            done={s.permissions.accessibility}
-            title="Let Viary type into apps"
-            text="Accessibility, to paste the text and see if a text field has focus."
-            action={
-              <button type="button" className={btn} onClick={() => api.requestPermission("accessibility")}>
-                Allow…
-              </button>
-            }
-          />
+          {PLATFORM === "windows" ? (
+            <Step
+              done={s.permissions.microphone !== false}
+              title="Let desktop apps use the microphone"
+              text={`Turned off in ${SYSTEM_SETTINGS} › Privacy & security › Microphone.`}
+              action={
+                <button type="button" className={btn} onClick={() => api.requestPermission("microphone")}>
+                  Open {SYSTEM_SETTINGS}
+                </button>
+              }
+            />
+          ) : (
+            <>
+              <Step
+                done={s.permissions.inputMonitoring || s.hotkeyActive}
+                title={`Let Viary notice the ${s.hotkeyName} key`}
+                text="Input Monitoring. Viary only watches the dictation key."
+                action={
+                  <button type="button" className={btn} onClick={() => api.requestPermission("inputMonitoring")}>
+                    Allow…
+                  </button>
+                }
+              />
+              <Step
+                done={s.permissions.accessibility}
+                title="Let Viary type into apps"
+                text="Accessibility, to paste the text and see if a text field has focus."
+                action={
+                  <button type="button" className={btn} onClick={() => api.requestPermission("accessibility")}>
+                    Allow…
+                  </button>
+                }
+              />
+            </>
+          )}
         </section>
       )}
 

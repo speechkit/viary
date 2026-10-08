@@ -3,8 +3,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useState } from "react";
+import type { Platform } from "./platform";
 
-export type Hotkey = "fn" | "rightOption" | "rightCommand";
+export type Hotkey = "fn" | "rightOption" | "rightCommand" | "rightAlt" | "ctrlWin" | "shortcut";
 export type Language = "auto" | "en" | "zh";
 export type Provider = "openAi" | "dashScope" | "customPolish";
 
@@ -164,14 +165,18 @@ export interface SpeechCaps {
 }
 
 export interface Snapshot {
+  platform: Platform;
   settings: Settings;
   speechCaps: SpeechCaps;
   engine: EngineStatus;
   keys: { openAi: boolean; dashScope: boolean; customPolish: boolean };
-  permissions: { accessibility: boolean; inputMonitoring: boolean };
+  /** Windows reports the microphone switch; macOS asks when recording starts. */
+  permissions: { accessibility: boolean; inputMonitoring: boolean; microphone?: boolean };
   hotkeyActive: boolean;
   hotkeyName: string;
   pill: PillView;
+  /** Dictation paused from the tray, until a time (ms since the epoch) or until resumed. */
+  paused: { until: number | null } | null;
   families: [string, FamilyInfo][];
   punctLayout: string | null;
 }
@@ -421,6 +426,9 @@ export const api = {
   /** File extensions speechkit decodes in this build, for the file dialog. */
   audioExtensions: () => invoke<string[]>("audio_extensions"),
   hidePopover: () => invoke<void>("hide_popover"),
+  /** Pauses dictation for `minutes`, or until resumed. */
+  pauseDictation: (minutes: number | null) => invoke<void>("pause_dictation", { minutes }),
+  resumeDictation: () => invoke<void>("resume_dictation"),
   quit: () => invoke<void>("quit"),
 };
 

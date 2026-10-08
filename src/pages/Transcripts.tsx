@@ -37,6 +37,7 @@ import { usePlayback, type Playback } from "../lib/playback";
 import { speakerColor } from "../lib/speakers";
 import { cueTime, currentIndex, daysAgo, matchRanges, spaced } from "../lib/transcript";
 import type { Intent } from "../windows/MainWindow";
+import { cmd, isMac, shortcut } from "../lib/platform";
 
 const lbl = "text-[11px] font-semibold tracking-[0.06em] text-faint uppercase";
 const btn = "inline-flex h-[34px] items-center gap-2 whitespace-nowrap rounded-[9px] border border-edge bg-white px-3 text-[13px] font-medium hover:bg-card";
@@ -325,7 +326,7 @@ function DropHint({ s, extensions, compact }: { s: Snapshot; extensions: string[
         </button>
       </div>
       <span className={compact ? "text-[13px] leading-[1.45] text-muted" : "text-xs text-faint"}>
-        {formatList(extensions)} · up to 3 hours · or drop on the Viary icon in the menu bar
+        {formatList(extensions)} · up to 3 hours{isMac && " · or drop on the Viary icon in the menu bar"}
         {!s.engine.active && !s.settings.transcripts.engine && " · choose a voice engine first"}
         {unusableEngine(s) && " · the engine for files can't be used; choose another below"}
       </span>
@@ -719,12 +720,12 @@ function Editor({ s, doc, seekTo }: { s: Snapshot; doc: TranscriptDoc; seekTo: n
         e.preventDefault();
         playback.toggle();
       }
-      if (e.metaKey && e.altKey && e.key.toLowerCase() === "f") {
+      if (cmd(e) && e.altKey && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setFinding(true);
       }
       // Tab jumps to the next unsure word after the playhead.
-      if (e.key === "Tab" && hasUnsure && !e.metaKey) {
+      if (e.key === "Tab" && hasUnsure && !cmd(e)) {
         const marks = [...(article.current?.querySelectorAll<HTMLElement>("[data-unsure]") ?? [])];
         const next = marks.find((m) => Number(m.dataset.unsure) > playback.pos + 50) ?? marks[0];
         if (!next) return;
@@ -762,7 +763,7 @@ function Editor({ s, doc, seekTo }: { s: Snapshot; doc: TranscriptDoc; seekTo: n
             {caption}
           </span>
         </div>
-        <button type="button" aria-pressed={finding} onClick={() => setFinding(!finding)} title="Find & replace (⌥⌘F)" className={btn}>
+        <button type="button" aria-pressed={finding} onClick={() => setFinding(!finding)} title={`Find & replace (${shortcut(["cmd", "alt"], "F")})`} className={btn}>
           <Icon name="search" />
           Find &amp; replace
         </button>
@@ -882,7 +883,7 @@ export function TranscriptsPage({ s, onBack, intent }: { s: Snapshot; onBack: ()
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey && e.key.toLowerCase() === "o") {
+      if (cmd(e) && e.key.toLowerCase() === "o") {
         e.preventDefault();
         add();
       }
@@ -918,7 +919,7 @@ export function TranscriptsPage({ s, onBack, intent }: { s: Snapshot; onBack: ()
         onBack={onBack}
         search={search}
         searchPlaceholder="Search transcripts"
-        action={{ label: "Add files (⌘O)", icon: <Icon name="fileAdd" size={19} strokeWidth={1.7} />, onClick: add }}
+        action={{ label: `Add files (${shortcut(["cmd"], "O")})`, icon: <Icon name="fileAdd" size={19} strokeWidth={1.7} />, onClick: add }}
       >
         {searching ? (
           <SearchResults query={search.query} onPick={pick} />

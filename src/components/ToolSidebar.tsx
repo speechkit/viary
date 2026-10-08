@@ -4,6 +4,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icons";
+import { cmd, isMac, shortcut } from "../lib/platform";
+
+const FIND = shortcut(["cmd"], "F");
 
 export interface ToolSearch {
   open: boolean;
@@ -22,7 +25,7 @@ export function useToolSearch(): ToolSearch {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "f") {
+      if (cmd(e) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setOpen(true);
         // Already open: ⌘F puts the cursor back in the field.
@@ -66,7 +69,7 @@ export function ToolSidebar({
       aria-label={label}
       className="relative flex h-full w-[300px] shrink-0 flex-col overflow-hidden border-r border-rule bg-sand"
     >
-      <div data-tauri-drag-region className="flex h-[52px] shrink-0 items-center gap-2 pr-3 pl-[88px]">
+      <div data-tauri-drag-region className={`flex h-[52px] shrink-0 items-center gap-2 pr-3 ${isMac ? "pl-[88px]" : "pl-3"}`}>
         <button type="button" onClick={onBack} aria-label="Back to Viary" title="Back to Viary" className={tbBtn}>
           <Icon name="back" strokeWidth={2.2} />
         </button>
@@ -80,8 +83,8 @@ export function ToolSidebar({
             if (!search.open) requestAnimationFrame(() => search.input.current?.focus());
           }}
           aria-pressed={search.open}
-          aria-label="Search (⌘F)"
-          title="Search (⌘F)"
+          aria-label={`Search (${FIND})`}
+          title={`Search (${FIND})`}
           className={tbBtn + (search.open ? " bg-ink/10" : "")}
         >
           <Icon name="search" size={18} />
