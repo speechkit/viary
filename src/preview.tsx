@@ -672,6 +672,20 @@ async function render() {
     }, 300);
   } else if (label === "setup") {
     const { Setup } = await import("./windows/Setup");
+    // A dictation from start to "Inserted", for the Try it step:
+    // run mockDictation() in the console.
+    Object.assign(window, {
+      mockDictation: async () => {
+        const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        await emit("pill-state", { kind: "listening", token: 9, startedAt: Date.now(), context: "Setup", live: true });
+        await wait(2200);
+        await emit("pill-state", { kind: "transcribing", label: "Transcribing" });
+        await wait(800);
+        await emit("pill-state", { kind: "inserted", label: "Inserted 7 words", canRaw: false });
+        await wait(1500);
+        await emit("pill-state", { kind: "idle" });
+      },
+    });
     document.body.style.background = "#CEC8BA";
     root.render(
       <div style={{ width: 1040, height: 700, margin: 24, borderRadius: 8, overflow: "hidden", boxShadow: "0 0 0 1px rgba(0,0,0,.12)" }}>
