@@ -55,7 +55,8 @@ keyring = { version = "3", features = ["windows-native"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 # The talk shortcut (GlobalShortcuts) and typing on Wayland (RemoteDesktop).
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts", "remote_desktop"] }
+# `remote_desktop` uses a ScreenCast type without enabling `screencast`.
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts", "remote_desktop", "screencast"] }
 # The clipboard, through X11 (XWayland on a Wayland session).
 arboard = { version = "3", default-features = false }
 # Typing and the active window on an X11 session.
