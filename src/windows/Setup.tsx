@@ -8,7 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ErrorBanner, Switch } from "../components/Controls";
 import { Icon, Mark } from "../components/Icons";
 import { AddModel, chooseVad, useAddModel } from "../pages/Engine";
-import { api, engineName, errorText, formatBytes, useHotkey, useMicLevel, useSnapshot, type Desktop, type Hotkey, type Snapshot, type Typing } from "../lib/ipc";
+import { api, engineName, errorText, formatBytes, useHotkey, useMicLevel, usePillView, useSnapshot, type Desktop, type Hotkey, type PillView, type Snapshot, type Typing } from "../lib/ipc";
 import { PLATFORM, THIS_COMPUTER } from "../lib/platform";
 
 /** GNOME's look and steps: Ubuntu. Windows otherwise. */
@@ -844,11 +844,110 @@ function TypingStep({ desktop }: { s: Snapshot; desktop: Desktop }) {
 type Body = (props: { s: Snapshot; desktop: Desktop }) => React.ReactNode;
 
 const BODIES: Body[] = GNOME
-  ? [GnomeMicrophoneStep, ShortcutStep, TypingStep, GnomeEngineStep, TryStep]
+  ? [GnomeMicrophoneStep, ShortcutStep, TypingStep, GnomeEngineStep, GnomeTryStep]
   : [MicrophoneStep, TalkKeyStep, EngineStep, TrayStep, TryStep];
 
 /** The voice engine step, which may be skipped. */
 const ENGINE = GNOME ? 3 : 2;
+
+function clock(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/** A dictation's progress in words, from what the pill shows. */
+function progress(view: PillView, now: number): { text: string; tone: "live" | "busy" | "done" | "warn" } | null {
+  switch (view.kind) {
+    case "listening":
+    case "handsFree":
+      return { text: `Listening · ${clock(now - view.startedAt)}`, tone: "live" };
+    case "transcribing":
+      return { text: view.label, tone: "busy" };
+    case "polishing":
+      return { text: "Polishing…", tone: "busy" };
+    case "inserted":
+      return { text: view.label, tone: "done" };
+    case "copied":
+      return { text: `${view.label} · ${view.hint}`, tone: "done" };
+    case "failed":
+      return { text: view.message, tone: "warn" };
+    case "hint":
+      return { text: view.text, tone: "warn" };
+    default:
+      return null;
+  }
+}
+
+const TONE = {
+  live: "bg-[#FF6B3D]",
+  busy: "bg-[#3584E4]",
+  done: "bg-[#26734D]",
+  warn: "bg-[#E5A50A]",
+};
+
+/** A first dictation on GNOME, worded for the shortcut and the typing
+ *  method, with its progress shown here: on Wayland without the extension
+ *  there is no pill on screen to watch. */
+function GnomeTryStep({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
+  const field = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => field.current?.focus(), []);
+  const view = usePillView();
+  const [now, setNow] = useState(Date.now());
+  const [worked, setWorked] = useState(false);
+  const listening = view.kind === "listening" || view.kind === "handsFree";
+  useEffect(() => {
+    if (!listening) return;
+    const timer = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(timer);
+  }, [listening]);
+  useEffect(() => {
+    if (view.kind === "inserted" || view.kind === "copied") setWorked(true);
+  }, [view.kind]);
+  const key = s.hotkeyName;
+  const toggle = desktop.shortcut.mode === "toggle";
+  const clipboardOnly = desktop.session === "wayland" && desktop.typing === "clipboard";
+  const state = progress(view, now);
+  return (
+    <>
+      <Heading step={4} title="Say something">
+        {toggle
+          ? `Press ${key}, speak, and press it again to type.`
+          : `Hold ${key}, speak, and let go. Double-tap it to keep listening hands-free until you tap again.`}
+      </Heading>
+      <div className={boxed}>
+        <textarea
+          ref={field}
+          rows={5}
+          aria-label="Try it here"
+          placeholder={toggle ? `Press ${key} and say something.` : `Hold ${key} and say something.`}
+          className="block w-full resize-none bg-white px-4 py-3 text-[15px] leading-[1.6] outline-none"
+        />
+        <div role="status" className="flex min-h-11 items-center gap-2.5 border-t border-black/8 px-4 text-[13px]">
+          {state ? (
+            <>
+              <span aria-hidden="true" className={"size-2 shrink-0 rounded-full " + TONE[state.tone]} />
+              <span className="truncate">{state.text}</span>
+            </>
+          ) : worked ? (
+            <span className="flex items-center gap-2 text-[#26734D]">
+              <Icon name="check" size={16} strokeWidth={2.2} />
+              It works. From now on Viary waits in the top bar.
+            </span>
+          ) : (
+            <span className="text-[#5E5E5E]">Waiting for {key}…</span>
+          )}
+        </div>
+      </div>
+      {clipboardOnly && (
+        <span className={sub}>
+          Viary is set to clipboard only: when the text is ready, press Ctrl+V here. You can change this in the step
+          before.
+        </span>
+      )}
+      <span className={sub}>It works the same in any app: Text Editor, Firefox, Terminal, LibreOffice.</span>
+    </>
+  );
+}
 
 /** Whether a step's requirement is met, so Continue can go on. */
 function ready(step: number, s: Snapshot): boolean {

@@ -501,6 +501,20 @@ export function useMicLevel(microphone: string | null): { level: number; error: 
   return { level, error };
 }
 
+/** What the pill shows, as it changes: for windows that report a
+ *  dictation's progress without being the pill. */
+export function usePillView(): PillView {
+  const [view, setView] = useState<PillView>({ kind: "idle" });
+  useEffect(() => {
+    api.state().then((s) => setView(s.pill), console.error);
+    const unlisten = listen<PillView>("pill-state", (e) => setView(e.payload));
+    return () => {
+      unlisten.then((stop) => stop());
+    };
+  }, []);
+  return view;
+}
+
 /** Calls `onKey` as the talk key goes down and up. */
 export function useHotkey(onKey: (down: boolean) => void) {
   useEffect(() => {
