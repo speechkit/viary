@@ -79,7 +79,9 @@ html[data-window="setup"] body {
 html[data-window="pill"],
 html[data-window="pill"] body,
 html[data-window="popover"],
-html[data-window="popover"] body {
+html[data-window="popover"] body,
+html[data-window="tip"],
+html[data-window="tip"] body {
   background: transparent;
   overflow: hidden;
 }

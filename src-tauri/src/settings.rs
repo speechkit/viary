@@ -409,6 +409,8 @@ pub struct Settings {
     pub hotkey: Hotkey,
     /// The setup window ran to its end (Windows).
     pub setup_done: bool,
+    /// The tip saying where the tray icon went was shown (Windows).
+    pub tray_tip_shown: bool,
     /// 0 keeps no recordings.
     pub keep_recordings_days: u32,
     pub openai: OpenAiSettings,
@@ -431,6 +433,7 @@ impl Default for Settings {
             language: Language::Auto,
             hotkey: Hotkey::default(),
             setup_done: false,
+            tray_tip_shown: false,
             keep_recordings_days: 7,
             openai: OpenAiSettings::default(),
             dashscope: DashScopeSettings::default(),

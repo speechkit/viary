@@ -1,5 +1,5 @@
 // Dev only: renders Viary's windows in a browser against a mocked backend,
-// to compare them with the design. Open /preview.html?w=main|popover|pill|setup.
+// to compare them with the design. Open /preview.html?w=main|popover|pill|setup|tip.
 
 import "@fontsource/geist-sans/400.css";
 import "@fontsource/geist-sans/500.css";
@@ -577,6 +577,10 @@ mockIPC(
       changed();
       return null;
     }
+    if (cmd === "close_tray_tip") {
+      console.info("close_tray_tip", a);
+      return null;
+    }
     if (cmd === "set_autostart") {
       snapshot.autostart = a.on as boolean;
       changed();
@@ -663,6 +667,10 @@ async function render() {
         <Setup />
       </div>,
     );
+  } else if (label === "tip") {
+    const { TrayTip } = await import("./windows/TrayTip");
+    document.body.style.background = "#3C5A74";
+    root.render(<TrayTip />);
   } else if (label === "popover") {
     const { Popover } = await import("./windows/Popover");
     document.body.style.background = "#CEC8BA";

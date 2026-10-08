@@ -69,14 +69,17 @@ pub const ALLOW_TYPING: &str = "Ctrl+V to paste";
 /// Windows has no prompt to show; the settings page is the way.
 pub fn request(_kind: &str) {}
 
-/// Opens the Settings page for `kind`.
+/// Opens the Settings page for `kind`: `microphone`, or `taskbar`, where
+/// tray icons can be kept in view.
 pub fn open_settings(kind: &str) {
-    if kind != "microphone" {
-        return;
-    }
+    let page = match kind {
+        "microphone" => "ms-settings:privacy-microphone",
+        "taskbar" => "ms-settings:taskbar",
+        _ => return,
+    };
     // Explorer hands the URI to Settings, without a console window.
     if let Err(error) = std::process::Command::new("explorer")
-        .arg("ms-settings:privacy-microphone")
+        .arg(page)
         .spawn()
     {
         tracing::warn!(%error, "cannot open Settings");
