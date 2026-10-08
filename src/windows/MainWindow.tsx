@@ -42,7 +42,7 @@ function StatusCard({ s }: { s: Snapshot }) {
   const active = s.engine.active;
   let dot = "bg-teal";
   let title = "Ready · on-device";
-  let text = "Audio never leaves this Mac with the current engine.";
+  let text = `${active?.name}: audio never leaves this Mac.`;
   if (s.engine.loading) {
     dot = "bg-amber";
     title = "Loading engine…";
@@ -54,7 +54,7 @@ function StatusCard({ s }: { s: Snapshot }) {
   } else if (!active.onDevice) {
     dot = "bg-blue";
     title = "Ready · cloud";
-    text = `Audio is sent to ${active.kind} for recognition.`;
+    text = `${active.name}: audio is sent to ${active.kind} for recognition.`;
   }
   return (
     <div className="flex flex-col gap-1.5 rounded-xl border border-rule bg-card p-3">
@@ -95,7 +95,7 @@ function Sidebar({ page, go, s }: { page: Page; go: (p: Page) => void; s: Snapsh
         <span className="inline-flex size-[30px] items-center justify-center rounded-[7px] bg-ink">
           <Mark size={19} />
         </span>
-        <span className="font-serif text-2xl leading-none font-medium tracking-[-0.02em]">Viary</span>
+        <span className="-mt-[3px] font-serif text-2xl leading-none font-medium tracking-[-0.02em]">viary</span>
       </div>
       {NAV.map((item) => (
         <NavItem key={item.id} item={item} current={item.id === page} go={go} />
