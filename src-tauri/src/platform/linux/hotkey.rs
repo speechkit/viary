@@ -3,6 +3,7 @@
 use crate::settings::Hotkey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(dead_code, reason = "the GNOME shortcut that sends these is not connected yet")]
 pub enum HotkeyEvent {
     Down,
     Up,
