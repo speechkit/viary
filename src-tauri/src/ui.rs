@@ -172,6 +172,9 @@ pub fn build_pill(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .visible_on_all_workspaces(true)
         .skip_taskbar(true)
         .focused(false)
+        // Never the key window: a click on Stop or Undo must leave the
+        // keyboard with the field being dictated into, Viary's own too.
+        .focusable(false)
         .accept_first_mouse(true)
         .visible(false)
         .build()?;
