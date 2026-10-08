@@ -294,6 +294,84 @@ impl PolishSettings {
     }
 }
 
+/// A file Transcripts saves next to the original.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    Srt,
+    Vtt,
+    Txt,
+    Md,
+}
+
+impl OutputFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Srt => "srt",
+            Self::Vtt => "vtt",
+            Self::Txt => "txt",
+            Self::Md => "md",
+        }
+    }
+}
+
+/// How many speakers to look for, once speaker separation exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SpeakerCount {
+    #[default]
+    Detect,
+    Two,
+    One,
+}
+
+/// How Transcripts handles new files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TranscriptSettings {
+    /// An engine id, or `None` for the dictation engine.
+    pub engine: Option<String>,
+    pub language: Language,
+    pub speakers: SpeakerCount,
+    pub formats: Vec<OutputFormat>,
+    /// Start each subtitle cue with the speaker's name, when known.
+    pub speaker_names: bool,
+}
+
+impl Default for TranscriptSettings {
+    fn default() -> Self {
+        Self {
+            engine: None,
+            language: Language::Auto,
+            speakers: SpeakerCount::Detect,
+            formats: vec![OutputFormat::Srt, OutputFormat::Vtt],
+            speaker_names: true,
+        }
+    }
+}
+
+impl TranscriptSettings {
+    /// These settings with the fields in `patch` changed.
+    ///
+    /// # Errors
+    ///
+    /// When `patch` names an unknown field or holds a wrong value.
+    pub fn patched(&self, patch: serde_json::Map<String, serde_json::Value>) -> Result<Self, String> {
+        let serde_json::Value::Object(mut fields) =
+            serde_json::to_value(self).map_err(|e| e.to_string())?
+        else {
+            return Err("transcript settings are not an object".into());
+        };
+        for (key, value) in patch {
+            if !fields.contains_key(&key) {
+                return Err(format!("unknown transcript setting `{key}`"));
+            }
+            fields.insert(key, value);
+        }
+        serde_json::from_value(serde_json::Value::Object(fields)).map_err(|e| e.to_string())
+    }
+}
+
 /// Everything Viary remembers between launches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -319,6 +397,7 @@ pub struct Settings {
     pub dashscope: DashScopeSettings,
     pub dictionary: Vec<DictionaryEntry>,
     pub polish: PolishSettings,
+    pub transcripts: TranscriptSettings,
 }
 
 impl Default for Settings {
@@ -338,6 +417,7 @@ impl Default for Settings {
             dashscope: DashScopeSettings::default(),
             dictionary: Vec::new(),
             polish: PolishSettings::default(),
+            transcripts: TranscriptSettings::default(),
         }
     }
 }

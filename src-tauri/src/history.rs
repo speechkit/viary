@@ -99,17 +99,7 @@ impl History {
     /// settings are, so the next save does not overwrite the only copy.
     pub fn open(dir: &Path) -> Self {
         let file = dir.join("history.json");
-        let entries = match fs::read_to_string(&file) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|error| {
-                let backup = file.with_extension("json.bak");
-                match fs::copy(&file, &backup) {
-                    Ok(_) => tracing::warn!(%error, backup = %backup.display(), "history unreadable; starting empty"),
-                    Err(copy) => tracing::error!(%error, %copy, "history unreadable and not backed up; starting empty"),
-                }
-                Vec::new()
-            }),
-            Err(_) => Vec::new(),
-        };
+        let entries = crate::json_store::load(&file, "history");
         Self {
             file,
             recordings: dir.join("recordings"),
@@ -213,19 +203,7 @@ impl History {
     }
 
     fn persist(&self, entries: &[Entry]) {
-        let result = self
-            .file
-            .parent()
-            .map_or(Ok(()), fs::create_dir_all)
-            .and_then(|()| serde_json::to_string(entries).map_err(std::io::Error::other))
-            .and_then(|text| {
-                let tmp = self.file.with_extension("json.tmp");
-                fs::write(&tmp, text)?;
-                fs::rename(&tmp, &self.file)
-            });
-        if let Err(error) = result {
-            tracing::error!(%error, "cannot save history");
-        }
+        crate::json_store::save(&self.file, entries, "history");
     }
 }
 

@@ -67,7 +67,23 @@ export interface PolishSettings {
   defaultTone: Tone;
 }
 
+export type OutputFormat = "srt" | "vtt" | "txt" | "md";
+
+/** How new files are transcribed. */
+export interface TranscriptSettings {
+  /** An engine id, or null for the dictation engine. */
+  engine: string | null;
+  language: Language;
+  /** Only with speaker separation: "detect", or how many speakers. */
+  speakers: "detect" | "two" | "one";
+  /** Saved next to the original when a file is done. */
+  formats: OutputFormat[];
+  /** Start each cue with the speaker's name, when speakers are known. */
+  speakerNames: boolean;
+}
+
 export interface Settings {
+  transcripts: TranscriptSettings;
   localModels: LocalModel[];
   activeEngine: string | null;
   vadModel: string | null;
@@ -134,8 +150,21 @@ export type PillView =
 
 export type PillAction = "undo" | "useRaw" | "retry" | "switchEngine" | "dismiss" | "skipPolish";
 
+/**
+ * What recognition can tell beyond passage text and times. speechkit 0.5
+ * provides none of these; dev builds can mock them (VIARY_MOCK_SPEECHKIT=1).
+ */
+export interface SpeechCaps {
+  speakers: boolean;
+  wordTimings: boolean;
+  wordConfidence: boolean;
+  /** The capabilities come from the dev fixture, not from speechkit. */
+  mock: boolean;
+}
+
 export interface Snapshot {
   settings: Settings;
+  speechCaps: SpeechCaps;
   engine: EngineStatus;
   keys: { openAi: boolean; dashScope: boolean; customPolish: boolean };
   permissions: { accessibility: boolean; inputMonitoring: boolean };
@@ -162,6 +191,136 @@ export interface HistoryItem {
   recording: string | null;
   recordingPath: string | null;
   words: number;
+}
+
+/** A word with its own timing, when the engine reports one. */
+export interface Word {
+  text: string;
+  startMs: number;
+  endMs: number;
+  /** 0 to 1, when the engine reports it. */
+  confidence: number | null;
+}
+
+/** One recognized passage: a segment of speech, with its own timing. */
+export interface Passage {
+  startMs: number;
+  endMs: number;
+  text: string;
+  /** The recognized text, once the passage has been edited. */
+  original?: string | null;
+  /** Index into the note's speakers, when speakers were found. */
+  speaker: number | null;
+  /** Only when the engine timed each word. */
+  words: Word[] | null;
+}
+
+export interface ActionItem {
+  who: string | null;
+  text: string;
+  atMs: number | null;
+  done: boolean;
+}
+
+export interface Note {
+  id: string;
+  title: string;
+  createdAt: number;
+  durationMs: number;
+  engine: { name: string; kind: string; onDevice: boolean };
+  passages: Passage[];
+  /** Empty unless speakers were found. */
+  speakers: { name: string }[];
+  marks: number[];
+  summary: string | null;
+  actions: ActionItem[];
+  summaryError: string | null;
+  /** Loudness for the player's waveform, 0 to 1. */
+  peaks: number[];
+  audioPath: string | null;
+  /** Parts of the recording not yet joined into its audio file. */
+  pendingAudio?: { file: string; rate: number }[];
+}
+
+export type StepState = "done" | "now" | "todo";
+
+/** The note being recorded or finished, if any. */
+export interface RecorderState {
+  phase: "idle" | "recording" | "paused" | "finishing";
+  id: string | null;
+  title: string;
+  /** Recorded time before `runningSince`. */
+  elapsedMs: number;
+  /** When the running part began (epoch ms); null while paused. */
+  runningSince: number | null;
+  marks: number[];
+  steps: { label: string; state: StepState }[];
+  error: string | null;
+  /** When `error` happened (epoch ms). */
+  errorAt: number | null;
+  /** The note just saved, to open. */
+  saved: string | null;
+  /** Recording while the voice engine finishes loading; pause and stop wait. */
+  waitingForEngine: boolean;
+}
+
+export interface LiveLine {
+  startMs: number;
+  text: string;
+}
+
+export type NoteFormat = "markdown" | "text";
+
+export type JobState =
+  | { kind: "waiting" }
+  | { kind: "running"; stage: string; progress: number | null; secondsLeft: number | null }
+  | { kind: "failed"; error: string };
+
+/** A file in the transcription queue. */
+export interface Job {
+  id: string;
+  path: string;
+  name: string;
+  durationMs: number | null;
+  state: JobState;
+}
+
+/** A transcript in the library, without its passages. */
+export interface TranscriptSummary {
+  id: string;
+  name: string;
+  source: string;
+  sourceExists: boolean;
+  createdAt: number;
+  durationMs: number;
+  engine: { name: string; kind: string; onDevice: boolean };
+  speakers: { name: string }[];
+  saved: string[];
+}
+
+export interface TranscriptDoc extends TranscriptSummary {
+  passages: Passage[];
+}
+
+export interface SearchHit {
+  id: string;
+  name: string;
+  count: number;
+  /** The first match. */
+  atMs: number;
+  before: string;
+  match: string;
+  after: string;
+}
+
+export interface Cue {
+  n: number;
+  startMs: number;
+  endMs: number;
+  text: string;
+  /** Speaker index, for highlighting and overlaps. */
+  speaker: number | null;
+  warning: string | null;
 }
 
 export interface Preferences {
@@ -223,6 +382,43 @@ export const api = {
   requestPermission: (kind: "accessibility" | "inputMonitoring" | "microphone") =>
     invoke<void>("request_permission", { kind }),
   openMain: (page: string) => invoke<void>("open_main", { page }),
+  /** Opens Voice Notes and starts a recording, as ⌥⌘N does. */
+  newVoiceNote: () => invoke<void>("new_voice_note"),
+  notes: () => invoke<Note[]>("notes_list"),
+  recorder: () => invoke<RecorderState>("note_recorder_state"),
+  /** The live transcript of the note being recorded, if any. */
+  noteLive: () => invoke<{ id: string; lines: LiveLine[]; partial: string; partialStartMs: number | null } | null>("note_live"),
+  notePause: () => invoke<void>("note_pause"),
+  noteResume: () => invoke<void>("note_resume"),
+  noteMark: () => invoke<void>("note_mark"),
+  noteDiscard: () => invoke<void>("note_discard"),
+  noteStop: () => invoke<void>("note_stop"),
+  /** Renames a note, or the one being recorded. */
+  noteRename: (id: string, title: string) => invoke<void>("note_rename", { id, title }),
+  noteSetAction: (id: string, index: number, done: boolean) => invoke<void>("note_set_action", { id, index, done }),
+  noteSetMarks: (id: string, marks: number[]) => invoke<void>("note_set_marks", { id, marks }),
+  noteDelete: (id: string) => invoke<void>("note_delete", { id }),
+  noteSummarize: (id: string) => invoke<void>("note_summarize", { id }),
+  noteText: (id: string, format: NoteFormat) => invoke<string>("note_text", { id, format }),
+  noteExport: (id: string, format: NoteFormat, path: string) => invoke<void>("note_export", { id, format, path }),
+  /** Opens Transcripts and adds these files and folders to the queue. */
+  transcribeFiles: (paths: string[]) => invoke<void>("transcribe_files", { paths }),
+  jobs: () => invoke<Job[]>("transcript_jobs"),
+  retryJob: (id: string) => invoke<void>("transcript_job_retry", { id }),
+  cancelJob: (id: string) => invoke<void>("transcript_job_cancel", { id }),
+  transcripts: () => invoke<TranscriptSummary[]>("transcripts_list"),
+  transcript: (id: string) => invoke<TranscriptDoc>("transcript_get", { id }),
+  searchTranscripts: (query: string) => invoke<SearchHit[]>("transcripts_search", { query }),
+  editPassage: (id: string, index: number, text: string) => invoke<void>("transcript_edit_passage", { id, index, text }),
+  renameSpeaker: (id: string, index: number, name: string) => invoke<void>("transcript_rename_speaker", { id, index, name }),
+  /** Replaces every match of `find`, ignoring case; returns how many. */
+  replaceAll: (id: string, find: string, replace: string) => invoke<number>("transcript_replace_all", { id, find, replace }),
+  deleteTranscript: (id: string) => invoke<void>("transcript_delete", { id }),
+  cues: (id: string, speakerNames: boolean) => invoke<Cue[]>("transcript_cues", { id, speakerNames }),
+  exportTranscript: (id: string, format: OutputFormat, path: string) => invoke<void>("transcript_export", { id, format, path }),
+  updateTranscriptSettings: (patch: Partial<TranscriptSettings>) => invoke<void>("update_transcript_settings", { patch }),
+  /** File extensions speechkit decodes in this build, for the file dialog. */
+  audioExtensions: () => invoke<string[]>("audio_extensions"),
   hidePopover: () => invoke<void>("hide_popover"),
   quit: () => invoke<void>("quit"),
 };
@@ -248,6 +444,72 @@ function useRefreshing<T>(fetch: () => Promise<T>): [T | null, () => void] {
 export const useSnapshot = () => useRefreshing(api.state);
 export const useHistory = () => useRefreshing(api.history);
 
+/** Calls `fetch` now and on `event` (and window focus, with `onFocus`),
+ *  not on every `state-changed`: for lists that change on their own. */
+function useReloadedOn<T>(fetch: () => Promise<T>, event: string, onFocus = false): T | null {
+  const [value, setValue] = useState<T | null>(null);
+  useEffect(() => {
+    const reload = () => {
+      fetch().then(setValue, (error) => console.error(error));
+    };
+    reload();
+    const stop = listen(event, reload);
+    if (onFocus) window.addEventListener("focus", reload);
+    return () => {
+      stop.then((f) => f());
+      window.removeEventListener("focus", reload);
+    };
+  }, [fetch, event, onFocus]);
+  return value;
+}
+
+/** The notes, newest first, reloaded when the backend changes them. */
+export const useNotes = (): Note[] | null => useReloadedOn(api.notes, "notes-changed");
+
+/** The transcription queue, kept current by its events. */
+export function useJobs(): Job[] {
+  const [jobs, setJobs] = useState<Job[]>([]);
+  useEffect(() => {
+    api.jobs().then(setJobs, console.error);
+    const stop = listen<Job[]>("transcript-jobs", ({ payload }) => setJobs(payload));
+    return () => {
+      stop.then((f) => f());
+    };
+  }, []);
+  return jobs;
+}
+
+/** The library, newest first, reloaded when it changes, and on focus, since
+ *  an original may have moved meanwhile. */
+export const useTranscripts = (): TranscriptSummary[] | null => useReloadedOn(api.transcripts, "transcripts-changed", true);
+
+/** The recorder's state, kept current by its events. */
+export function useRecorder(): RecorderState | null {
+  const [state, setState] = useState<RecorderState | null>(null);
+  useEffect(() => {
+    // An error from before the page opened is old news, unless it is what
+    // opened the page (⌥⌘N with no voice engine fails as the page opens).
+    api.recorder().then((initial) => {
+      const fresh = initial.errorAt !== null && Date.now() - initial.errorAt < 5_000;
+      setState(fresh ? initial : { ...initial, error: null });
+    }, console.error);
+    const stop = listen<RecorderState>("note-recorder", ({ payload }) => setState(payload));
+    return () => {
+      stop.then((f) => f());
+    };
+  }, []);
+  return state;
+}
+
+/** "4:21", or "1:02:05" past an hour. */
+export function clock(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
+}
+
 /** The engine's name for the menu bar and the sidebar. */
 export function engineLabel(info: EngineInfo): string {
   return info.onDevice ? `On-device · ${info.name}` : `Cloud · ${info.kind} · ${info.name}`;
@@ -272,6 +534,20 @@ export function toneIn(polish: PolishSettings, app: string): Tone {
   const own = polish.tones.find((t) => t.app.toLowerCase() === app.toLowerCase())?.tone ?? polish.defaultTone;
   if (own === "literal") return "literal";
   return polish.appTone ? own : "asSpoken";
+}
+
+/** The microphone Viary records from: the chosen one, or the system default's name. */
+export function useMicrophoneName(s: Snapshot | null): string {
+  const [fallback, setFallback] = useState("Default microphone");
+  const chosen = s?.settings.microphone ?? null;
+  useEffect(() => {
+    if (chosen) return;
+    api.microphones().then(
+      (list) => setFallback(list.find((m) => m.isDefault)?.name ?? "Default microphone"),
+      () => {},
+    );
+  }, [chosen]);
+  return chosen ?? fallback;
 }
 
 export function formatBytes(bytes: number): string {

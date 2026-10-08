@@ -196,6 +196,12 @@ fn instructions(settings: &Settings, app: &str) -> String {
 }
 
 impl Request {
+    /// The same model and server, with other instructions.
+    pub fn with_system(mut self, system: String) -> Self {
+        self.system = system;
+        self
+    }
+
     /// Sends `text` to the model and returns its rewrite.
     ///
     /// # Errors
@@ -203,6 +209,18 @@ impl Request {
     /// A readable message when the server cannot be reached, refuses, times
     /// out, or replies with something that is not a rewrite.
     pub fn run(&self, text: &str, timeout: Duration) -> Result<String, String> {
+        let reply = self.complete(text, timeout)?;
+        check(text, &reply)
+    }
+
+    /// Sends `text` to the model and returns its reply, without a reasoning
+    /// block.
+    ///
+    /// # Errors
+    ///
+    /// A readable message when the server cannot be reached, refuses, times
+    /// out, or sends no text.
+    pub fn complete(&self, text: &str, timeout: Duration) -> Result<String, String> {
         let agent = ureq::AgentBuilder::new().timeout(timeout).build();
         let mut call = agent.post(&self.url);
         if let Some(key) = &self.key {
@@ -241,7 +259,18 @@ impl Request {
         let content = reply["choices"][0]["message"]["content"]
             .as_str()
             .ok_or("the polish model sent no text")?;
-        check(text, content)
+        let content = without_reasoning(content).trim();
+        if content.is_empty() {
+            return Err("the polish model sent no text".into());
+        }
+        Ok(content.to_owned())
+    }
+}
+
+fn without_reasoning(reply: &str) -> &str {
+    match reply.trim_start().strip_prefix("<think>") {
+        Some(rest) => rest.split_once("</think>").map_or("", |(_, after)| after),
+        None => reply,
     }
 }
 
@@ -258,11 +287,7 @@ fn length(text: &str) -> usize {
 /// answered instead of rewriting. Length is weighed across scripts, so a
 /// translation from Chinese into English passes.
 fn check(said: &str, reply: &str) -> Result<String, String> {
-    let reply = match reply.trim_start().strip_prefix("<think>") {
-        Some(rest) => rest.split_once("</think>").map_or("", |(_, after)| after),
-        None => reply,
-    };
-    let reply = reply.trim();
+    let reply = without_reasoning(reply).trim();
     if reply.is_empty() {
         return Err("the polish model sent no text".into());
     }

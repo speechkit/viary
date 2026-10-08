@@ -274,8 +274,8 @@ pub fn toggle_popover(app: &AppHandle, icon: tauri::Rect) {
     let scale = popover.scale_factor().unwrap_or(1.0);
     let at = icon.position.to_logical::<f64>(scale);
     let size = icon.size.to_logical::<f64>(scale);
+    // The popover keeps the height it fitted to its content.
     let (width, _) = POPOVER_SIZE;
-    let _ = popover.set_size(LogicalSize::new(POPOVER_SIZE.0, POPOVER_SIZE.1));
     let _ = popover.set_position(LogicalPosition::new(
         (at.x + size.width / 2.0 - width / 2.0).max(8.0),
         at.y + size.height + 4.0,

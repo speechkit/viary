@@ -1,16 +1,23 @@
 //! Viary: hold a key, speak, and the words are typed where the cursor is.
 
+mod caps;
 mod dictation;
 mod dictionary;
 mod engines;
 mod history;
 mod icons;
+mod json_store;
 mod keychain;
 #[cfg(target_os = "macos")]
 mod macos;
+mod note_recorder;
+mod notes;
 mod polish;
 mod reload;
 mod settings;
+mod subtitles;
+mod transcriber;
+mod transcripts;
 mod recording;
 mod ui;
 
@@ -25,7 +32,8 @@ use speechkit::{
     audio::{DecodeLimits, read},
     sherpa::Provider as ExecutionProvider,
 };
-use tauri::{AppHandle, Manager, State, tray::TrayIconBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, tray::TrayIconBuilder};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 use crate::{
     dictation::{Msg, PillAction, PillView},
@@ -45,6 +53,10 @@ pub struct App {
     store: SettingsStore,
     engines: Arc<Engines>,
     history: History,
+    notes: notes::Notes,
+    recorder: note_recorder::Recorder,
+    transcripts: transcripts::Transcripts,
+    transcriber: transcriber::Transcriber,
     pill: Mutex<PillView>,
     dictation: OnceLock<Sender<Msg>>,
     hotkey: OnceLock<HotkeyListener>,
@@ -155,6 +167,7 @@ struct Keys {
 #[serde(rename_all = "camelCase")]
 struct Snapshot {
     settings: Settings,
+    speech_caps: caps::SpeechCaps,
     engine: EngineStatus,
     keys: Keys,
     permissions: permissions::Permissions,
@@ -188,6 +201,7 @@ fn get_state(state: State<'_, App>) -> Snapshot {
         pill: lock(&state.pill).clone(),
         families,
         punct_layout,
+        speech_caps: caps::current(),
         settings,
     }
 }
@@ -648,6 +662,352 @@ fn open_main(app: AppHandle, page: String) {
     ui::open_main(&app, &page);
 }
 
+/// ⌥⌘N, from anywhere: Voice Notes, recording.
+const NEW_NOTE_SHORTCUT: (Modifiers, Code) = (Modifiers::ALT.union(Modifiers::SUPER), Code::KeyN);
+
+/// Opens Voice Notes and starts recording, unless a note already is.
+fn new_voice_note_now(app: &AppHandle) -> Result<(), String> {
+    ui::open_main(app, "notes:new");
+    app.state::<App>().recorder.start(app)
+}
+
+#[tauri::command]
+fn new_voice_note(app: AppHandle) -> CmdResult<()> {
+    new_voice_note_now(&app)
+}
+
+// ---------------------------------------------------------------------------
+// Voice notes
+
+#[tauri::command]
+fn notes_list(state: State<'_, App>) -> Vec<notes::Listed> {
+    state.notes.list()
+}
+
+#[tauri::command]
+fn note_recorder_state(state: State<'_, App>) -> note_recorder::RecorderState {
+    state.recorder.state()
+}
+
+#[tauri::command]
+fn note_live(state: State<'_, App>) -> Option<note_recorder::LivePayload> {
+    state.recorder.live()
+}
+
+#[tauri::command]
+fn note_pause(app: AppHandle, state: State<'_, App>) {
+    state.recorder.pause(&app);
+}
+
+#[tauri::command]
+fn note_resume(app: AppHandle, state: State<'_, App>) {
+    state.recorder.resume(&app);
+}
+
+#[tauri::command]
+fn note_mark(app: AppHandle, state: State<'_, App>) {
+    state.recorder.mark(&app);
+}
+
+#[tauri::command]
+fn note_discard(app: AppHandle, state: State<'_, App>) {
+    state.recorder.discard(&app);
+}
+
+#[tauri::command]
+fn note_stop(app: AppHandle, state: State<'_, App>) {
+    state.recorder.stop(&app);
+}
+
+fn notes_changed(app: &AppHandle) {
+    let _ = app.emit("notes-changed", ());
+}
+
+#[tauri::command]
+fn note_rename(app: AppHandle, state: State<'_, App>, id: String, title: String) {
+    let title = title.trim();
+    if title.is_empty() || state.recorder.rename(&app, &id, title) {
+        return;
+    }
+    state.notes.update(&id, |note| note.title = title.into());
+    notes_changed(&app);
+}
+
+#[tauri::command]
+fn note_set_action(app: AppHandle, state: State<'_, App>, id: String, index: usize, done: bool) {
+    state.notes.update(&id, |note| {
+        if let Some(action) = note.actions.get_mut(index) {
+            action.done = done;
+        }
+    });
+    notes_changed(&app);
+}
+
+/// Sets a note's marks, as the note view edits them.
+#[tauri::command]
+fn note_set_marks(app: AppHandle, state: State<'_, App>, id: String, mut marks: Vec<u64>) {
+    marks.sort_unstable();
+    marks.dedup();
+    state.notes.update(&id, |note| {
+        marks.retain(|&m| m <= note.duration_ms);
+        note.marks = marks;
+    });
+    notes_changed(&app);
+}
+
+#[tauri::command]
+fn note_delete(app: AppHandle, state: State<'_, App>, id: String) {
+    state.notes.delete(&id);
+    notes_changed(&app);
+}
+
+#[tauri::command]
+async fn note_summarize(app: AppHandle, id: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<App>();
+        let note = state.notes.get(&id).ok_or("the note is gone")?;
+        let result = notes::summarize(&state.settings(), &note);
+        state.notes.update(&id, |note| match result {
+            Ok(summary) => {
+                note.summary = Some(summary.summary);
+                note.actions = summary.actions;
+                note.summary_error = None;
+            }
+            Err(error) => note.summary_error = Some(error),
+        });
+        notes_changed(&app);
+        Ok(())
+    })
+    .await
+    .map_err(err)?
+}
+
+/// The note as Markdown or text; the summary only while polish is on.
+fn note_document(state: &App, id: &str, format: notes::Format) -> CmdResult<String> {
+    let note = state.notes.get(id).ok_or("the note is gone")?;
+    Ok(notes::render(
+        &note,
+        format,
+        state.settings().polish.enabled,
+    ))
+}
+
+#[tauri::command]
+fn note_text(state: State<'_, App>, id: String, format: notes::Format) -> CmdResult<String> {
+    note_document(&state, &id, format)
+}
+
+#[tauri::command]
+fn note_export(
+    state: State<'_, App>,
+    id: String,
+    format: notes::Format,
+    path: PathBuf,
+) -> CmdResult<()> {
+    let text = note_document(&state, &id, format)?;
+    std::fs::write(&path, text).map_err(err)
+}
+
+const NOTHING_TO_TRANSCRIBE: &str = "None of these files can be transcribed";
+
+/// Files and folders to transcribe, from the file dialog, the window, or
+/// the menu bar icon: queues them and opens Transcripts.
+fn transcribe(app: &AppHandle, paths: Vec<PathBuf>) -> Result<(), String> {
+    let files = transcriber::expand(paths);
+    if files.is_empty() {
+        // Transcripts says so, however the files came (the menu bar icon
+        // has no other way to answer).
+        ui::open_main(app, "transcripts:nothing");
+        return Err(NOTHING_TO_TRANSCRIBE.into());
+    }
+    app.state::<App>().transcriber.add(app, files);
+    ui::open_main(app, "transcripts:added");
+    Ok(())
+}
+
+/// Looking through folders can take a while, so it is off the main thread.
+#[tauri::command]
+async fn transcribe_files(app: AppHandle, paths: Vec<PathBuf>) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || transcribe(&app, paths))
+        .await
+        .map_err(err)?
+}
+
+// ---------------------------------------------------------------------------
+// Transcripts
+
+#[tauri::command]
+fn transcript_jobs(state: State<'_, App>) -> Vec<transcriber::Job> {
+    state.transcriber.jobs()
+}
+
+#[tauri::command]
+fn transcript_job_retry(app: AppHandle, state: State<'_, App>, id: String) {
+    state.transcriber.retry(&app, &id);
+}
+
+#[tauri::command]
+fn transcript_job_cancel(app: AppHandle, state: State<'_, App>, id: String) {
+    state.transcriber.cancel(&app, &id);
+}
+
+#[tauri::command]
+fn transcripts_list(state: State<'_, App>) -> Vec<transcripts::Summary> {
+    state.transcripts.list()
+}
+
+#[tauri::command]
+fn transcript_get(
+    app: AppHandle,
+    state: State<'_, App>,
+    id: String,
+) -> CmdResult<transcripts::Doc> {
+    let transcript = state.transcripts.get(&id).ok_or("the transcript is gone")?;
+    // The original stays where the user keeps it; let the player read it.
+    if let Err(error) = app.asset_protocol_scope().allow_file(&transcript.source) {
+        tracing::warn!(%error, "cannot play the original file");
+    }
+    Ok(transcript.doc())
+}
+
+#[tauri::command]
+fn transcripts_search(state: State<'_, App>, query: String) -> Vec<transcripts::Hit> {
+    state.transcripts.search(&query)
+}
+
+/// Changes a transcript, then the files saved next to its original.
+fn change_transcript<T>(
+    app: &AppHandle,
+    state: &App,
+    id: &str,
+    change: impl FnOnce(&mut transcripts::Transcript) -> T,
+) -> CmdResult<T> {
+    let (out, changed) = state
+        .transcripts
+        .update(id, change)
+        .ok_or("the transcript is gone")?;
+    state
+        .transcripts
+        .rewrite_saved(&changed.id, || state.settings().transcripts.speaker_names, false);
+    let _ = app.emit("transcripts-changed", ());
+    Ok(out)
+}
+
+#[tauri::command]
+fn transcript_edit_passage(
+    app: AppHandle,
+    state: State<'_, App>,
+    id: String,
+    index: usize,
+    text: String,
+) -> CmdResult<()> {
+    change_transcript(&app, &state, &id, |t| t.edit(index, text.trim()))
+}
+
+#[tauri::command]
+fn transcript_rename_speaker(
+    app: AppHandle,
+    state: State<'_, App>,
+    id: String,
+    index: usize,
+    name: String,
+) -> CmdResult<()> {
+    change_transcript(&app, &state, &id, |t| {
+        if let Some(speaker) = t.speakers.get_mut(index) {
+            speaker.name = name.trim().to_owned();
+        }
+    })
+}
+
+#[tauri::command]
+fn transcript_replace_all(
+    app: AppHandle,
+    state: State<'_, App>,
+    id: String,
+    find: String,
+    replace: String,
+) -> CmdResult<usize> {
+    change_transcript(&app, &state, &id, |t| t.replace_all(&find, &replace))
+}
+
+#[tauri::command]
+fn transcript_delete(app: AppHandle, state: State<'_, App>, id: String) {
+    state.transcripts.delete(&id);
+    let _ = app.emit("transcripts-changed", ());
+}
+
+#[tauri::command]
+fn transcript_cues(
+    state: State<'_, App>,
+    id: String,
+    speaker_names: bool,
+) -> CmdResult<Vec<subtitles::Cue>> {
+    let t = state.transcripts.get(&id).ok_or("the transcript is gone")?;
+    Ok(subtitles::cues(&t.passages, &t.speakers, speaker_names))
+}
+
+#[tauri::command]
+fn transcript_export(
+    state: State<'_, App>,
+    id: String,
+    format: settings::OutputFormat,
+    path: PathBuf,
+) -> CmdResult<()> {
+    let t = state.transcripts.get(&id).ok_or("the transcript is gone")?;
+    transcripts::export(
+        &t,
+        format,
+        &path,
+        state.settings().transcripts.speaker_names,
+    )
+    .map_err(err)
+}
+
+/// Changes the settings for new files named in `patch`. Turning speaker
+/// names on or off updates the subtitles already saved.
+#[tauri::command]
+fn update_transcript_settings(
+    app: AppHandle,
+    state: State<'_, App>,
+    patch: serde_json::Map<String, serde_json::Value>,
+) -> CmdResult<()> {
+    let before = state.settings().transcripts.speaker_names;
+    let mut outcome = Ok(());
+    let settings = state.change(|s| match s.transcripts.patched(patch) {
+        Ok(transcripts) => s.transcripts = transcripts,
+        Err(error) => outcome = Err(error),
+    });
+    let names = settings.transcripts.speaker_names;
+    if names != before {
+        // Only subtitles of transcripts with speakers change; rewrite them
+        // off the main thread, each as it is then, with the names setting
+        // as it is then.
+        let with_speakers: Vec<String> = state
+            .transcripts
+            .all()
+            .into_iter()
+            .filter(|t| !t.speakers.is_empty())
+            .map(|t| t.id)
+            .collect();
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let state = app.state::<App>();
+            for id in &with_speakers {
+                state
+                    .transcripts
+                    .rewrite_saved(id, || state.settings().transcripts.speaker_names, true);
+            }
+        });
+    }
+    ui::refresh(&app);
+    outcome
+}
+
+#[tauri::command]
+fn audio_extensions() -> Vec<&'static str> {
+    speechkit::audio::EXTENSIONS.to_vec()
+}
+
 #[tauri::command]
 fn hide_popover(app: AppHandle) {
     if let Some(popover) = app.get_webview_window("popover") {
@@ -686,6 +1046,10 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
         store,
         engines: Arc::new(Engines::new()),
         history,
+        notes: notes::Notes::open(&data_dir),
+        recorder: note_recorder::Recorder::default(),
+        transcripts: transcripts::Transcripts::open(&data_dir),
+        transcriber: transcriber::Transcriber::default(),
         pill: Mutex::new(PillView::Idle),
         dictation: OnceLock::new(),
         hotkey: OnceLock::new(),
@@ -713,7 +1077,35 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
             }
         })
         .build(app)?;
+    #[cfg(target_os = "macos")]
+    if let Some(tray) = app.tray_by_id(ui::TRAY_ID) {
+        let dropped = handle.clone();
+        let _ = tray.with_inner_tray_icon(move |inner| {
+            if let Some(item) = inner.ns_status_item() {
+                macos::tray_drop::install(&item, move |paths| {
+                    // Called on the main thread; folders are looked through
+                    // on another.
+                    let dropped = dropped.clone();
+                    std::thread::spawn(move || {
+                        if let Err(error) = transcribe(&dropped, paths) {
+                            tracing::warn!(%error, "nothing to transcribe in the dropped files");
+                        }
+                    });
+                });
+            }
+        });
+    }
+    let (modifiers, key) = NEW_NOTE_SHORTCUT;
+    if let Err(error) = app
+        .global_shortcut()
+        .register(Shortcut::new(Some(modifiers), key))
+    {
+        // Another app holds ⌥⌘N; the menu bar item still works.
+        tracing::warn!(%error, "cannot register ⌥⌘N");
+    }
 
+    transcriber::spawn(handle.clone());
+    note_recorder::retry_pending(handle.clone());
     let mailbox = dictation::spawn(handle.clone());
     let _ = state.dictation.set(mailbox.clone());
     let listener = HotkeyListener::spawn(settings.hotkey, move |event| {
@@ -758,6 +1150,19 @@ pub fn run() {
         .init();
     let built = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    let (modifiers, key) = NEW_NOTE_SHORTCUT;
+                    if event.state() == ShortcutState::Pressed
+                        && shortcut.matches(modifiers, key)
+                        && let Err(error) = new_voice_note_now(app)
+                    {
+                        tracing::warn!(%error, "cannot start a voice note");
+                    }
+                })
+                .build(),
+        )
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
             get_state,
@@ -787,6 +1192,37 @@ pub fn run() {
             fit_pill,
             request_permission,
             open_main,
+            new_voice_note,
+            notes_list,
+            note_recorder_state,
+            note_live,
+            note_pause,
+            note_resume,
+            note_mark,
+            note_discard,
+            note_stop,
+            note_rename,
+            note_set_action,
+            note_set_marks,
+            note_delete,
+            note_summarize,
+            note_text,
+            note_export,
+            transcribe_files,
+            transcript_jobs,
+            transcript_job_retry,
+            transcript_job_cancel,
+            transcripts_list,
+            transcript_get,
+            transcripts_search,
+            transcript_edit_passage,
+            transcript_rename_speaker,
+            transcript_replace_all,
+            transcript_delete,
+            transcript_cues,
+            transcript_export,
+            update_transcript_settings,
+            audio_extensions,
             hide_popover,
             quit,
         ])

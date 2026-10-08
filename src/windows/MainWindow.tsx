@@ -10,10 +10,26 @@ import { HistoryPage } from "../pages/History";
 import { HomePage } from "../pages/Home";
 import { PolishPage } from "../pages/Polish";
 import { SettingsPage } from "../pages/Settings";
+import { TranscriptsPage } from "../pages/Transcripts";
+import { VoiceNotesPage } from "../pages/VoiceNotes";
 
-type Page = "home" | "history" | "dictionary" | "polish" | "engine" | "settings";
+type MainPage = "home" | "history" | "dictionary" | "polish" | "engine" | "settings";
+type Tool = "notes" | "transcripts";
+type Page = MainPage | Tool;
 
-const NAV: { id: Page; label: string; icon: IconName }[] = [
+const TOOLS: { id: Tool; label: string; icon: IconName }[] = [
+  { id: "notes", label: "Voice Notes", icon: "notes" },
+  { id: "transcripts", label: "Transcripts", icon: "transcript" },
+];
+
+export interface Intent {
+  action: string | null;
+  n: number;
+}
+
+const isTool = (page: Page): page is Tool => page === "notes" || page === "transcripts";
+
+const NAV: { id: MainPage; label: string; icon: IconName }[] = [
   { id: "home", label: "Home", icon: "home" },
   { id: "history", label: "History", icon: "history" },
   { id: "dictionary", label: "Dictionary", icon: "dictionary" },
@@ -51,6 +67,23 @@ function StatusCard({ s }: { s: Snapshot }) {
   );
 }
 
+function NavItem({ item, current, go }: { item: { id: Page; label: string; icon: IconName }; current: boolean; go: (p: Page) => void }) {
+  return (
+    <button
+      type="button"
+      aria-current={current ? "page" : undefined}
+      onClick={() => go(item.id)}
+      className={
+        "flex h-[38px] shrink-0 items-center gap-2.5 rounded-[9px] px-2.5 text-left text-sm font-medium " +
+        (current ? "bg-card text-ink" : "text-muted hover:bg-card/60")
+      }
+    >
+      <Icon name={item.icon} size={18} strokeWidth={1.7} />
+      <span className="grow">{item.label}</span>
+    </button>
+  );
+}
+
 function Sidebar({ page, go, s }: { page: Page; go: (p: Page) => void; s: Snapshot }) {
   return (
     <nav
@@ -64,25 +97,15 @@ function Sidebar({ page, go, s }: { page: Page; go: (p: Page) => void; s: Snapsh
         </span>
         <span className="font-serif text-2xl leading-none font-medium tracking-[-0.02em]">Viary</span>
       </div>
-      {NAV.map((item) => {
-        const current = item.id === page;
-        return (
-          <button
-            key={item.id}
-            type="button"
-            aria-current={current ? "page" : undefined}
-            onClick={() => go(item.id)}
-            className={
-              "flex h-[38px] items-center gap-2.5 rounded-[9px] px-2.5 text-left text-sm font-medium " +
-              (current ? "bg-card text-ink" : "text-muted hover:bg-card/60")
-            }
-          >
-            <Icon name={item.icon} size={18} strokeWidth={1.7} />
-            <span className="grow">{item.label}</span>
-          </button>
-        );
-      })}
+      {NAV.map((item) => (
+        <NavItem key={item.id} item={item} current={item.id === page} go={go} />
+      ))}
       <div className="grow" />
+      <span className="px-2.5 pb-1 text-[11px] font-semibold tracking-[0.06em] text-faint uppercase">Tools</span>
+      {TOOLS.map((item) => (
+        <NavItem key={item.id} item={item} current={item.id === page} go={go} />
+      ))}
+      <div className="h-3 shrink-0" />
       <StatusCard s={s} />
     </nav>
   );
@@ -91,13 +114,27 @@ function Sidebar({ page, go, s }: { page: Page; go: (p: Page) => void; s: Snapsh
 export function MainWindow() {
   const [s] = useSnapshot();
   const [page, setPage] = useState<Page>("home");
+  // Where "Back to Viary" returns from a tool.
+  const [lastMain, setLastMain] = useState<MainPage>("home");
   const [focusEntry, setFocusEntry] = useState<string | null>(null);
+  // What a tool was opened to do ("new", "choose"); `n` makes a repeat count.
+  const [intent, setIntent] = useState<Intent>({ action: null, n: 0 });
+
+  // Going somewhere by hand carries no request, so a tool opened again
+  // later does not repeat the last one (such as opening the file picker).
+  const go = (target: Page) => {
+    if (!isTool(target)) setLastMain(target);
+    setPage(target);
+    setIntent((i) => ({ action: null, n: i.n }));
+  };
 
   useEffect(() => {
     const stop = listen<string>("navigate", ({ payload }) => {
       const [target, entry] = payload.split(":");
+      if (!isTool(target as Page)) setLastMain(target as MainPage);
       setPage(target as Page);
       setFocusEntry(entry ?? null);
+      setIntent((i) => ({ action: entry ?? null, n: i.n + 1 }));
     });
     return () => {
       stop.then((f) => f());
@@ -105,12 +142,22 @@ export function MainWindow() {
   }, []);
 
   if (!s) return null;
+  if (isTool(page)) {
+    // A tool's own sidebar replaces the main one.
+    const back = () => setPage(lastMain);
+    return (
+      <div className="relative flex h-full overflow-hidden bg-paper">
+        {page === "notes" && <VoiceNotesPage s={s} onBack={back} intent={intent} />}
+        {page === "transcripts" && <TranscriptsPage s={s} onBack={back} intent={intent} />}
+      </div>
+    );
+  }
   return (
     <div className="relative flex h-full overflow-hidden bg-paper">
-      <Sidebar page={page} go={setPage} s={s} />
+      <Sidebar page={page} go={go} s={s} />
       <div className="scroll relative min-w-0 grow">
         <div data-tauri-drag-region className="absolute inset-x-0 top-0 h-[28px]" />
-        {page === "home" && <HomePage s={s} go={setPage} />}
+        {page === "home" && <HomePage s={s} go={go} />}
         {page === "history" && <HistoryPage s={s} focus={focusEntry} />}
         {page === "dictionary" && <DictionaryPage s={s} />}
         {page === "polish" && <PolishPage s={s} />}

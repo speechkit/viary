@@ -811,6 +811,16 @@ impl Engines {
         Ok(self.runtime.get_or_init(|| runtime).clone())
     }
 
+    /// Builds engine `id` apart from the dictation engine, for
+    /// transcribing files with another one. Blocks while it loads.
+    ///
+    /// # Errors
+    ///
+    /// As loading the engine for dictation.
+    pub fn build_separate(&self, id: &str, settings: &Settings) -> Result<LoadedEngine, SpeechError> {
+        build(id, settings, &self.runtime()?)
+    }
+
     /// Loads engine `id` with `settings` in the background, and calls
     /// `done` once it is decided. A request superseded by a newer one is
     /// decided by that one, so `done` then reports whichever engine is

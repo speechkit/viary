@@ -10,8 +10,8 @@ use std::{
 
 use speechkit::{
     AudioBuffer, SampleRate, SpeechError,
-    asr::{AsrEngine, AsrOptions, AsrResult, LiveTranscript},
-    io::{CaptureOptions, ListenOptions, Listening, Microphone},
+    asr::{AsrEngine, AsrOptions, AsrResult, AsrUpdate, LiveTranscript},
+    io::{Capture, CaptureOptions, ListenOptions, Listening, Microphone},
 };
 
 /// The most audio kept for History and Retry.
@@ -41,22 +41,61 @@ impl Recording {
     }
 
     /// Starts at once; speechkit retains audio while the backend connects.
+    /// `on_update` gets the level and, when it changed, the live text.
     pub fn start(
         microphone: &Microphone,
         engine: &AsrEngine,
         options: AsrOptions,
         on_update: impl Fn(f32, Option<String>) + Send + 'static,
     ) -> Result<Self, SpeechError> {
+        let mut live = LiveTranscript::new();
+        Self::start_with(
+            microphone,
+            engine,
+            options,
+            MAX_RECORDING,
+            move |level, updates| {
+                for update in updates {
+                    live.apply(update);
+                }
+                on_update(level, (!updates.is_empty()).then(|| live.text()));
+            },
+        )
+    }
+
+    /// Like `start`, for up to `max_length` of audio, with the updates
+    /// received since the last call instead of the joined text.
+    pub fn start_with(
+        microphone: &Microphone,
+        engine: &AsrEngine,
+        options: AsrOptions,
+        max_length: Duration,
+        on_update: impl FnMut(f32, &[AsrUpdate]) + Send + 'static,
+    ) -> Result<Self, SpeechError> {
         let capture = microphone.capture(CaptureOptions::default())?;
+        Self::listen_on(&capture, engine, options, max_length, None, on_update)
+    }
+
+    /// Like `start_with`, on a capture already running, from capture time
+    /// `start` (which the capture must still hold), or from now.
+    pub fn listen_on(
+        capture: &Capture,
+        engine: &AsrEngine,
+        options: AsrOptions,
+        max_length: Duration,
+        start: Option<Duration>,
+        mut on_update: impl FnMut(f32, &[AsrUpdate]) + Send + 'static,
+    ) -> Result<Self, SpeechError> {
         // The recording grows only as the engine takes audio, and audio the
         // listening could not hold is gone from it too. Hold as much as the
         // recording does, so an engine slower than real time, or one still
         // connecting, does not cost the audio after the default 30 s.
-        let listen = ListenOptions::default()
-            .with_recording(MAX_RECORDING)
-            .with_max_backlog(MAX_RECORDING);
+        let listen = start
+            .map_or_else(ListenOptions::default, ListenOptions::starting_at)
+            .with_recording(max_length)
+            .with_max_backlog(max_length);
         let listening =
-            Arc::new(capture.listen(engine, options.with_max_length(MAX_RECORDING), listen)?);
+            Arc::new(capture.listen(engine, options.with_max_length(max_length), listen)?);
         let observer = Arc::downgrade(&listening);
         let mut updates = listening.updates();
         let stopped = Arc::new(AtomicBool::new(false));
@@ -64,19 +103,18 @@ impl Recording {
         std::thread::Builder::new()
             .name("viary-observer".into())
             .spawn(move || {
-                let mut live = LiveTranscript::new();
+                let mut batch = Vec::new();
                 while let Some(listening) = observer.upgrade() {
                     // The listening ends only once its session does, which
                     // can be long after key-up; the pill is done by then.
                     if quiet.load(Ordering::Acquire) {
                         break;
                     }
-                    let mut changed = false;
+                    batch.clear();
                     while let Ok(update) = updates.try_recv() {
-                        live.apply(&update);
-                        changed = true;
+                        batch.push(update);
                     }
-                    on_update(listening.level(), changed.then(|| live.text()));
+                    on_update(listening.level(), &batch);
                     if listening.end().is_some() {
                         break;
                     }
@@ -89,9 +127,15 @@ impl Recording {
             .map_err(|error| SpeechError::backend("viary", true, error))?;
         Ok(Self {
             listening,
-            sample_rate: microphone.sample_rate(),
+            sample_rate: capture.sample_rate(),
             stopped,
         })
+    }
+
+    /// The capture time of the recording's first sample. Its segments' times
+    /// are capture times too.
+    pub fn origin(&self) -> Duration {
+        self.listening.origin()
     }
 
     /// Ends the input immediately in the key-up handler.
@@ -402,6 +446,40 @@ mod tests {
         ));
         assert_eq!(audio.samples.len(), spoken);
         release.send(()).unwrap();
+    }
+
+    #[test]
+    fn a_listening_handed_over_on_the_same_capture_leaves_no_gap() {
+        // As a voice note rolls over: the next listening starts at the
+        // capture's position, then the running one stops, and is cut there.
+        let (microphone, input) = Microphone::fake(RATE);
+        let engine = engine(None, false);
+        let capture = microphone
+            .capture(CaptureOptions::default().with_history(Duration::from_secs(5)))
+            .unwrap();
+        let listen = |from| {
+            Recording::listen_on(&capture, &engine, AsrOptions::default(), MAX_RECORDING, from, |_, _| {})
+                .unwrap()
+        };
+        let first = listen(None);
+        let mut spoken = speak(&input, 2);
+        let handover = capture.position();
+        let second = listen(Some(handover));
+        first.stop();
+        spoken += speak(&input, 2);
+        std::thread::sleep(Duration::from_millis(200));
+        second.stop();
+
+        let origin = first.origin();
+        let (_, mut a) = first.finish(TIMEOUT);
+        let keep = RATE.frames_in(handover - origin);
+        a.samples.truncate(usize::try_from(keep).unwrap());
+        // The second listening's times are capture times, from the handover.
+        assert_eq!(second.origin(), handover);
+        let (result, b) = second.finish(TIMEOUT);
+        // Cut at the handover, every sample is in exactly one part.
+        assert_eq!(a.samples.len() + b.samples.len(), spoken);
+        assert!(result.unwrap().segments.iter().all(|s| s.end > handover));
     }
 
     #[test]
