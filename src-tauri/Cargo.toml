@@ -27,6 +27,7 @@ rubato = { version = "5", default-features = false }
 # Blocking HTTP for the polish model, called from worker threads.
 ureq = { version = "2.12", features = ["json"] }
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
