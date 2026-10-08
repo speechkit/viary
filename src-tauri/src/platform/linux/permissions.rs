@@ -42,7 +42,8 @@ pub fn request(_kind: &str) {}
 /// Opens GNOME Settings at `kind`'s page.
 pub fn open_settings(kind: &str) {
     let panel = match kind {
-        "microphone" => "privacy",
+        // Input device and volume.
+        "microphone" => "sound",
         "inputMonitoring" => "keyboard",
         _ => return,
     };

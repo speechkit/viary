@@ -491,6 +491,8 @@ function transcriptCommand(cmd: string, a: Record<string, unknown>): unknown {
   }
 }
 
+let micTimer: ReturnType<typeof setInterval> | undefined;
+
 /** Commands that change settings update the mock and tell the windows. */
 function changed() {
   setTimeout(() => emit("state-changed"), 0);
@@ -575,6 +577,15 @@ mockIPC(
       await new Promise((r) => setTimeout(r, 600));
       snapshot.desktop.extension = "installed";
       changed();
+      return null;
+    }
+    if (cmd === "mic_test") {
+      // A voice that comes and goes, for the setup window's meter.
+      clearInterval(micTimer);
+      if (a.on) {
+        let t = 0;
+        micTimer = setInterval(() => emit("mic-level", Math.max(0.002, Math.abs(Math.sin(t++ * 0.31)) * 0.12)), 50);
+      }
       return null;
     }
     if (cmd === "close_tray_tip") {
