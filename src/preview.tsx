@@ -112,6 +112,10 @@ const snapshot: Snapshot = {
   pill: { kind: "idle" },
   paused: null,
   autostart: true,
+  desktop:
+    PLATFORM === "linux"
+      ? { session: "wayland", shortcut: { mode: params.get("gnome") === "46" ? "toggle" : "hold", bound: false }, typing: "clipboard", portalAllowed: false }
+      : null,
   families: [
     ["1", { id: "streaming-transducer", label: "Streaming Zipformer", description: "Shows words while you speak. Commits a phrase at each pause.", tags: ["Live preview", "Hotwords"], streaming: true, needsVad: false, nativePunctuation: false }],
     ["2", { id: "sense-voice", label: "SenseVoice", description: "Fast and punctuated. Transcribes each phrase after a pause.", tags: ["5 languages", "Punctuation"], streaming: false, needsVad: true, nativePunctuation: true }],
@@ -544,6 +548,19 @@ mockIPC(
     }
     if (cmd === "resume_dictation") {
       snapshot.paused = null;
+      changed();
+      return null;
+    }
+    if (cmd === "bind_shortcut" && snapshot.desktop) {
+      await new Promise((r) => setTimeout(r, 600));
+      snapshot.desktop.shortcut.bound = true;
+      changed();
+      return null;
+    }
+    if (cmd === "set_typing" && snapshot.desktop) {
+      await new Promise((r) => setTimeout(r, 400));
+      snapshot.desktop.typing = a.method as "portal" | "clipboard";
+      if (a.method === "portal") snapshot.desktop.portalAllowed = true;
       changed();
       return null;
     }

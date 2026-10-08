@@ -164,6 +164,15 @@ export interface SpeechCaps {
   mock: boolean;
 }
 
+export interface Desktop {
+  session: "wayland" | "x11";
+  /** `hold` reports down and up; `toggle` (GNOME 46) only presses. */
+  shortcut: { mode: "hold" | "toggle" | "unknown"; bound: boolean };
+  typing: "portal" | "clipboard";
+  /** GNOME already allowed typing through the RemoteDesktop portal. */
+  portalAllowed: boolean;
+}
+
 export interface Snapshot {
   platform: Platform;
   settings: Settings;
@@ -179,6 +188,8 @@ export interface Snapshot {
   paused: { until: number | null } | null;
   /** Viary starts when the user signs in. */
   autostart: boolean;
+  /** The GNOME session, talk shortcut, and typing method on Linux; null elsewhere. */
+  desktop: Desktop | null;
   families: [string, FamilyInfo][];
   punctLayout: string | null;
 }
@@ -436,6 +447,10 @@ export const api = {
   setKeyTest: (on: boolean) => invoke<void>("set_key_test", { on }),
   /** Closes the setup window for good; Viary goes on in the tray. */
   finishSetup: () => invoke<void>("finish_setup"),
+  /** Asks GNOME for the talk shortcut (Linux). */
+  bindShortcut: () => invoke<void>("bind_shortcut"),
+  /** How Viary types on Wayland; `portal` asks GNOME now (Linux). */
+  setTyping: (method: "portal" | "clipboard") => invoke<void>("set_typing", { method }),
   quit: () => invoke<void>("quit"),
 };
 

@@ -1,5 +1,6 @@
-//! Whether the focused UI element can take typed text: unknown, so always
-//! assumed.
+//! Whether the focused UI element can take typed text. Wayland does not
+//! say, and AT-SPI is not asked yet: anything gets the paste, which is
+//! harmless where nothing takes text.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
