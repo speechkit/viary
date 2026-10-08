@@ -64,6 +64,16 @@ const paths = {
   trash: "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13",
   shield: "M12 3l8 3v6c0 5-3.5 8-8 9c-4.5-1-8-4-8-9V6z",
   translate: "M4 5h8M8 3v2M6 5c0 4 3 7 6 8M10 5c-1 4-4 7-6 8M13 21l4-9 4 9M14.5 18h5",
+  notes: "M6 3h12a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM9 10v4M12 8v8M15 11v2",
+  transcript: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M8 13h8M8 17h5",
+  fileAdd: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M12 11v6M9 14h6",
+  back: "M15 6l-6 6 6 6",
+  upload: "M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",
+  back15: "M4 12a8 8 0 1 0 3-6.2M4 4v5h5",
+  fwd15: "M20 12a8 8 0 1 1-3-6.2M20 4v5h-5",
+  flag: "M5 21V4h11l-2 4 2 4H5",
+  more: "M5 12h.01M12 12h.01M19 12h.01",
+  pen: "M4 20h4L19 9l-4-4L4 16v4z",
 } as const;
 
 export type IconName = keyof typeof paths;
@@ -88,6 +98,16 @@ export function Icon({
       {...rest}
     >
       <path d={paths[name]} />
+    </svg>
+  );
+}
+
+/** A ring around a red dot: start a voice note. */
+export function RecordIcon({ size = 20 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" className="shrink-0">
+      <circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <circle cx="12" cy="12" r="4.4" fill="#E0452B" />
     </svg>
   );
 }

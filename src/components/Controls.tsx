@@ -22,12 +22,15 @@ export function Select<T extends string | number>({
   options,
   onChange,
   disabled = false,
+  shrink = false,
 }: {
   label: string;
   value: T;
   options: { value: T; label: string }[];
   onChange: (value: T) => void;
   disabled?: boolean;
+  /** Narrows, truncating the label, when its row runs out of room. */
+  shrink?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [up, setUp] = useState(false);
@@ -72,7 +75,7 @@ export function Select<T extends string | number>({
   };
 
   return (
-    <div ref={root} className="relative shrink-0" onKeyDown={onKey}>
+    <div ref={root} className={"relative " + (shrink ? "min-w-0" : "shrink-0")} onKeyDown={onKey}>
       <button
         type="button"
         aria-label={label}
@@ -81,6 +84,7 @@ export function Select<T extends string | number>({
         disabled={disabled}
         onClick={() => (open ? setOpen(false) : show())}
         className={
+          (shrink ? "w-full " : "") +
           "flex h-[34px] max-w-[300px] items-center gap-2 rounded-lg border bg-white pr-2.5 pl-3 text-[13px] font-medium text-ink disabled:opacity-50 " +
           (open ? "border-ink" : "border-edge hover:border-stone")
         }
