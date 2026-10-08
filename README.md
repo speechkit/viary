@@ -49,7 +49,7 @@ For an independent polish service, choose **Custom** under **Polish & tone** to 
 The parts that talk to the system live in `src-tauri/src/platform/`, one module per system with the same items; everything else is shared.
 
 - **Windows** (in progress): hold Right Alt or Ctrl + Win, watched by a low-level keyboard hook that only listens. Text goes in with Ctrl+V through `SendInput`, with the clipboard saved and restored and kept out of clipboard history. Apps running as administrator do not accept Viary's keys, so their text stays on the clipboard. API keys are in Windows Credential Manager. Left-click the tray icon for the flyout, right-click for the menu.
-- **Linux** (not yet): the module only keeps the app building. The plan is the GNOME design: an AppIndicator, a talk shortcut from GNOME, and typing through Viary's GNOME Shell extension or the remote-interaction portal.
+- **Linux** (in progress, GNOME): the talk shortcut is Ctrl+Alt+Space, handed over by GNOME's GlobalShortcuts portal (hold to talk), or on GNOME 46 a custom shortcut running `viary --toggle` (press to start, press again to insert). On Wayland, Viary types through its GNOME Shell extension (`gnome-extension/`, installed from the setup window; GNOME starts it at the next login), which also draws the pill, or through the RemoteDesktop portal; otherwise the text stays on the clipboard and results come as notifications. X11 types with XTest. API keys are in the GNOME keyring.
 
 CI builds and tests on macOS, Windows, and Ubuntu (`.github/workflows/ci.yml`). `/preview.html?os=windows` renders the windows as they look on Windows.
 

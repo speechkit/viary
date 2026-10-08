@@ -91,15 +91,36 @@ pub fn refresh(app: &AppHandle) {
 
 pub fn show_pill(app: &AppHandle, view: &PillView) {
     app.state::<App>().set_pill(view.clone());
-    // Wayland has no pill window: results come as notifications.
+    // Wayland has no pill window: the shell draws it when Viary's
+    // extension runs; otherwise results come as notifications.
     #[cfg(target_os = "linux")]
-    if crate::platform::is_wayland() {
+    if crate::platform::shell_pill() {
+        crate::platform::extension::show_pill(view);
+    } else if crate::platform::is_wayland() {
         crate::platform::notify::pill(view);
     }
     if let Some(pill) = app.get_webview_window("pill") {
         let _ = pill.set_ignore_cursor_events(!view.interactive());
     }
     let _ = app.emit("pill-state", view);
+}
+
+/// The microphone level while listening, for the pill's bars.
+pub fn pill_level(app: &AppHandle, level: f32) {
+    let _ = app.emit_to("pill", "pill-level", level);
+    #[cfg(target_os = "linux")]
+    if crate::platform::shell_pill() {
+        crate::platform::extension::level(level);
+    }
+}
+
+/// The live text of dictation `token`, for the pill.
+pub fn pill_partial(app: &AppHandle, token: u64, text: String) {
+    #[cfg(target_os = "linux")]
+    if crate::platform::shell_pill() {
+        crate::platform::extension::partial(token, text.clone());
+    }
+    let _ = app.emit_to("pill", "pill-partial", (token, text));
 }
 
 /// Opens the main window on `page` (`engine`, `history`, ...).

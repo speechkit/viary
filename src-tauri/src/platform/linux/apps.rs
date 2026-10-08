@@ -1,8 +1,8 @@
 //! The app the user is dictating into. X11 names the active window;
-//! Wayland tells other apps nothing, so there the target is unknown and
-//! the paste goes wherever the focus is.
+//! Wayland tells other apps nothing, so there only Viary's extension can
+//! say, and without it the paste goes wherever the focus is.
 
-use super::{is_wayland, x11};
+use super::{extension, is_wayland, x11};
 
 #[derive(Debug, Clone, Default)]
 pub struct TargetApp {
@@ -20,7 +20,12 @@ impl TargetApp {
 
 pub fn frontmost() -> Option<TargetApp> {
     if is_wayland() {
-        return None;
+        // Only the shell knows; its extension may say.
+        if !extension::active() {
+            return None;
+        }
+        let (pid, name) = extension::focused_app()?;
+        return Some(TargetApp { pid, name, window: 0 });
     }
     let (window, pid, name) = x11::active_window()?;
     Some(TargetApp { pid, name, window })

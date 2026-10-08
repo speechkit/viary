@@ -707,7 +707,18 @@ async fn bind_shortcut(app: AppHandle) -> CmdResult<()> {
     bound
 }
 
-/// Chooses how Viary types on Wayland: `portal` or `clipboard` (Linux).
+/// Installs Viary's GNOME Shell extension (Linux).
+#[tauri::command]
+async fn install_extension(app: AppHandle) -> CmdResult<()> {
+    let installed = tauri::async_runtime::spawn_blocking(platform::install_extension)
+        .await
+        .map_err(err)?;
+    ui::refresh(&app);
+    installed
+}
+
+/// Chooses how Viary types on Wayland: `extension`, `portal`, or
+/// `clipboard` (Linux).
 #[tauri::command]
 async fn set_typing(app: AppHandle, method: String) -> CmdResult<()> {
     let set = tauri::async_runtime::spawn_blocking(move || platform::set_typing(&method))
@@ -1217,6 +1228,7 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
     {
         platform::init(&handle, &config_dir);
         platform::notify::listen(&handle);
+        platform::extension::listen(&handle);
     }
     let keys = handle.clone();
     let listener = HotkeyListener::spawn(settings.hotkey, move |event| {
@@ -1310,6 +1322,7 @@ pub fn run() {
             set_key_test,
             bind_shortcut,
             set_typing,
+            install_extension,
             finish_setup,
             get_state,
             list_microphones,

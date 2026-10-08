@@ -1,0 +1,57 @@
+/* The dictation pill, as Viary draws it on macOS and Windows. */
+.viary-pill {
+  background-color: #17161a;
+  border-radius: 999px;
+  padding: 0 10px 0 18px;
+  min-height: 52px;
+  spacing: 14px;
+  color: #ffffff;
+  font-size: 15px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+.viary-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 5px;
+  background-color: #ff6b3d;
+}
+.viary-bars {
+  spacing: 3px;
+}
+.viary-bar {
+  width: 3px;
+  border-radius: 2px;
+  background-color: #ff8a5c;
+}
+.viary-older {
+  color: rgba(255, 255, 255, 0.55);
+}
+.viary-clock {
+  font-family: monospace;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+}
+.viary-context {
+  border-radius: 999px;
+  padding: 6px 12px;
+  background-color: rgba(255, 255, 255, 0.1);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.85);
+}
+.viary-chip {
+  border-radius: 999px;
+  padding: 6px 12px;
+  background-color: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  font-size: 13px;
+}
+.viary-chip:hover {
+  background-color: rgba(255, 255, 255, 0.24);
+}
+.viary-chip-primary {
+  background-color: #ffffff;
+  color: #17161a;
+}
+.viary-chip-primary:hover {
+  background-color: rgba(255, 255, 255, 0.9);
+}

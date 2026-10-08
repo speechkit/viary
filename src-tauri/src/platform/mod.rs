@@ -42,6 +42,10 @@ mod desktop {
     pub fn set_typing(_method: &str) -> Result<(), String> {
         Err("this system has one way to type".into())
     }
+
+    pub fn install_extension() -> Result<(), String> {
+        Err("GNOME Shell extensions are for Linux".into())
+    }
 }
 #[cfg(not(target_os = "linux"))]
 pub use desktop::*;

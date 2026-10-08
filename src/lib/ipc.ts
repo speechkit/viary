@@ -164,13 +164,17 @@ export interface SpeechCaps {
   mock: boolean;
 }
 
+export type Typing = "extension" | "portal" | "clipboard";
+
 export interface Desktop {
   session: "wayland" | "x11";
   /** `hold` reports down and up; `toggle` (GNOME 46) only presses. */
   shortcut: { mode: "hold" | "toggle" | "unknown"; bound: boolean };
-  typing: "portal" | "clipboard";
+  typing: Typing;
   /** GNOME already allowed typing through the RemoteDesktop portal. */
   portalAllowed: boolean;
+  /** Viary's GNOME Shell extension: runs only from the login after it is installed. */
+  extension: "missing" | "installed" | "active";
 }
 
 export interface Snapshot {
@@ -450,7 +454,9 @@ export const api = {
   /** Asks GNOME for the talk shortcut (Linux). */
   bindShortcut: () => invoke<void>("bind_shortcut"),
   /** How Viary types on Wayland; `portal` asks GNOME now (Linux). */
-  setTyping: (method: "portal" | "clipboard") => invoke<void>("set_typing", { method }),
+  setTyping: (method: Typing) => invoke<void>("set_typing", { method }),
+  /** Installs Viary's GNOME Shell extension; it runs from the next login (Linux). */
+  installExtension: () => invoke<void>("install_extension"),
   quit: () => invoke<void>("quit"),
 };
 

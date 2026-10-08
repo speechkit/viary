@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use super::{Typing, is_wayland, prefs};
+use super::{Typing, extension, is_wayland, prefs};
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,7 +25,11 @@ pub fn check() -> Permissions {
 pub fn can_type() -> bool {
     !is_wayland() || {
         let prefs = prefs();
-        prefs.typing == Typing::Portal && prefs.restore_token.is_some()
+        match prefs.typing {
+            Typing::Extension => extension::active(),
+            Typing::Portal => prefs.restore_token.is_some(),
+            Typing::Clipboard => false,
+        }
     }
 }
 

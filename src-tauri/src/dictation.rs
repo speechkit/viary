@@ -21,7 +21,7 @@ use speechkit::{
     AudioBuffer, SpeechError,
     asr::Transcript,
 };
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use crate::{
     App, dictionary,
@@ -436,9 +436,9 @@ impl Controller {
             &engine.engine,
             options,
             move |level, text, closed| {
-                let _ = app.emit_to("pill", "pill-level", level);
+                ui::pill_level(&app, level);
                 if let Some(text) = text {
-                    let _ = app.emit_to("pill", "pill-partial", (token, text));
+                    ui::pill_partial(&app, token, text);
                 }
                 if closed {
                     let _ = mailbox.send(Msg::Closed(token));

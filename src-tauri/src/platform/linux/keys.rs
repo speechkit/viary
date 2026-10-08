@@ -1,10 +1,10 @@
-//! Synthetic Ctrl+V and Ctrl+Z: XTest on X11, the RemoteDesktop portal on
-//! Wayland once the user chose it. Keysyms, not keycodes, so the layout
-//! decides which key types "v".
+//! Synthetic Ctrl+V and Ctrl+Z: XTest on X11; on Wayland, Viary's GNOME
+//! Shell extension or the RemoteDesktop portal, whichever the user chose.
+//! Keysyms, not keycodes, so the layout decides which key types "v".
 
 use tauri::AppHandle;
 
-use super::{Typing, is_wayland, prefs, remote, x11};
+use super::{Typing, extension, is_wayland, prefs, remote, x11};
 
 fn control(letter: u32) -> Result<(), String> {
     let keys = [x11::CONTROL_L, letter];
@@ -12,6 +12,8 @@ fn control(letter: u32) -> Result<(), String> {
         return x11::press(&keys);
     }
     match prefs().typing {
+        Typing::Extension if letter == x11::KEY_V => extension::paste(),
+        Typing::Extension => extension::undo(),
         Typing::Portal => remote::press(&keys),
         Typing::Clipboard => Err("Viary leaves the text on the clipboard".into()),
     }
