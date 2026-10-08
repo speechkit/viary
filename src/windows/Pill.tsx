@@ -72,13 +72,56 @@ function Shell({ children, tight = false }: { children: React.ReactNode; tight?:
   );
 }
 
-function Listening({ view, levels, text }: { view: Extract<PillView, { kind: "listening" }>; levels: number[]; text: string }) {
+/** The time now, ticking four times a second. */
+function useNow(): number {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 250);
     return () => clearInterval(timer);
   }, []);
+  return now;
+}
+
+function Wave({ levels }: { levels: number[] }) {
+  return (
+    <div className="flex h-7 items-center gap-[3px]" aria-hidden="true">
+      {levels.map((level, i) => (
+        <div
+          key={i}
+          className="w-[3px] rounded-[2px] bg-wave transition-[height] duration-100 ease-out"
+          style={{ height: barHeight(level) }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** The live text, or what to expect before it. */
+function Words({ text, live }: { text: string; live: boolean }) {
   const { older, newest } = tail(text);
+  return (
+    <div className="flex w-[320px] justify-end overflow-hidden text-[15px]">
+      {newest ? (
+        <>
+          <span className="text-white/60">{older}</span>
+          <span>&nbsp;{newest}</span>
+        </>
+      ) : (
+        <span className="text-white/60">{live ? "Listening…" : "Listening · words appear after each pause"}</span>
+      )}
+    </div>
+  );
+}
+
+function Context({ text }: { text: string }) {
+  if (!text) return null;
+  return (
+    <span className="inline-flex h-8 items-center rounded-full bg-white/[0.14] px-3 text-[13px] font-medium">{text}</span>
+  );
+}
+
+function Listening({ view, levels, text }: { view: Extract<PillView, { kind: "listening" }>; levels: number[]; text: string }) {
+  const now = useNow();
   return (
     <Shell>
       <span
@@ -86,31 +129,28 @@ function Listening({ view, levels, text }: { view: Extract<PillView, { kind: "li
         className="size-[9px] rounded-full bg-live"
         style={{ boxShadow: "0 0 0 4px rgba(255,107,61,0.25)" }}
       />
-      <div className="flex h-7 items-center gap-[3px]" aria-hidden="true">
-        {levels.map((level, i) => (
-          <div
-            key={i}
-            className="w-[3px] rounded-[2px] bg-wave transition-[height] duration-100 ease-out"
-            style={{ height: barHeight(level) }}
-          />
-        ))}
-      </div>
-      <div className="flex w-[320px] justify-end overflow-hidden text-[15px]">
-        {newest ? (
-          <>
-            <span className="text-white/60">{older}</span>
-            <span>&nbsp;{newest}</span>
-          </>
-        ) : (
-          <span className="text-white/60">{view.live ? "Listening…" : "Listening · words appear after each pause"}</span>
-        )}
-      </div>
+      <Wave levels={levels} />
+      <Words text={text} live={view.live} />
       <span className="font-mono text-xs text-white/60">{clock(now - view.startedAt)}</span>
-      {view.context && (
-        <span className="inline-flex h-8 items-center rounded-full bg-white/[0.14] px-3 text-[13px] font-medium">
-          {view.context}
-        </span>
-      )}
+      <Context text={view.context} />
+    </Shell>
+  );
+}
+
+function HandsFree({ view, levels, text }: { view: Extract<PillView, { kind: "handsFree" }>; levels: number[]; text: string }) {
+  const now = useNow();
+  return (
+    <Shell tight>
+      <Icon name="lock" size={16} />
+      <Wave levels={levels} />
+      <Words text={text} live={view.live} />
+      <span className="font-mono text-xs text-white/60">
+        {clock(Math.min(now - view.startedAt, view.limitMs))} / {clock(view.limitMs)}
+      </span>
+      <Context text={view.context} />
+      <Chip label="Stop and insert" onClick={() => api.pill("stop")}>
+        Stop
+      </Chip>
     </Shell>
   );
 }
@@ -153,7 +193,7 @@ export function Pill() {
     api.state().then((s) => setView(s.pill), console.error);
     const stops = [
       listen<PillView>("pill-state", ({ payload }) => {
-        if (payload.kind === "listening" && payload.token !== token.current) {
+        if ((payload.kind === "listening" || payload.kind === "handsFree") && payload.token !== token.current) {
           token.current = payload.token;
           setPartial("");
           setLevels(Array(BARS).fill(0));
@@ -177,6 +217,9 @@ export function Pill() {
       break;
     case "listening":
       body = <Listening view={view} levels={levels} text={partial} />;
+      break;
+    case "handsFree":
+      body = <HandsFree view={view} levels={levels} text={partial} />;
       break;
     case "transcribing":
       body = (
