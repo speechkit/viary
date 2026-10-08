@@ -56,6 +56,9 @@ const ENGINE_WAIT: Duration = Duration::from_secs(120);
 const ENGINE_WAIT_HISTORY: Duration = Duration::from_secs(130);
 /// A note stops and saves itself here.
 const MAX_NOTE: Duration = Duration::from_secs(3 * 60 * 60);
+/// A part whose recognition ends sooner than this is not followed by
+/// another automatically: it would only end again.
+const RECOVER_AFTER: Duration = Duration::from_secs(5);
 /// The audio a part's microphone keeps, so the next part can start on it
 /// where the running one is.
 const HANDOVER: Duration = Duration::from_secs(5);
@@ -176,6 +179,9 @@ struct PartOut {
     /// Recorded time before the part, by the clock.
     clock_ms: u64,
     error: Option<String>,
+    /// The audio, while it could not be written to `pcm`: kept to try again
+    /// when the note is saved.
+    unsaved: Option<AudioBuffer>,
 }
 
 /// Where a part's speech goes in the note.
@@ -511,6 +517,22 @@ impl Recorder {
         renamed
     }
 
+    /// A part of note `id` could not be written to disk: pauses the note if
+    /// it is still being recorded, and shows why. The part's audio is kept
+    /// and written when the note is saved.
+    fn storage_failed(&self, app: &AppHandle, id: &str, error: &std::io::Error) {
+        let mut inner = lock(&self.inner);
+        let Some(active) = inner.active.as_mut().filter(|a| a.id == id) else {
+            return;
+        };
+        end_part(app, active);
+        inner.error = failure(format!(
+            "Part of the recording couldn't be saved to disk ({error}), so recording is paused; it is saved when you stop"
+        ));
+        drop(inner);
+        self.changed(app);
+    }
+
     fn step(&self, app: &AppHandle, id: &str, label: &str) {
         let mut inner = lock(&self.inner);
         if let Some(finishing) = inner.finishing.iter_mut().find(|f| f.id == id) {
@@ -653,6 +675,29 @@ fn start_part(app: &AppHandle, active: &mut Active) -> Result<(), String> {
     Ok(())
 }
 
+/// After the running part stopped hearing: with its microphone `lost`, goes
+/// on with the microphone opened anew (the chosen one, or the default);
+/// otherwise (its recognition ended) hands over to a new part on the same
+/// microphone, unless it ended within moments of starting, which would only
+/// repeat. Returns the error to show; when nothing can go on, the note is
+/// paused.
+fn recover(app: &AppHandle, active: &mut Active, lost: bool, running: Duration) -> Option<(String, u64)> {
+    if lost {
+        tracing::warn!("the microphone of a voice note was lost");
+        end_part(app, active);
+        return match start_part(app, active) {
+            Ok(()) => failure("The microphone was disconnected; recording goes on with the one available"),
+            Err(_) => failure("The microphone was disconnected, so recording is paused"),
+        };
+    }
+    tracing::warn!("a voice note's recognition ended by itself");
+    if running < RECOVER_AFTER {
+        end_part(app, active);
+        return failure("Recognition stopped, so recording is paused");
+    }
+    roll_part(app, active).err().and_then(failure)
+}
+
 /// Rolls the running part over without a gap: the next part listens on the
 /// same microphone from where it is now, then the running part stops there
 /// (the two share at most a buffer of audio). If the next part cannot start
@@ -661,7 +706,12 @@ fn roll_part(app: &AppHandle, active: &mut Active) -> Result<(), String> {
     let Some(running) = active.part.take() else {
         return Ok(());
     };
-    let handover = running.capture.position();
+    // Where the running part stops hearing: now, or where its recognition
+    // already ended by itself (the capture still holds that audio).
+    let handover = running
+        .recording
+        .end()
+        .unwrap_or_else(|| running.capture.position());
     let next = open_part(
         app,
         active,
@@ -727,6 +777,7 @@ fn finish_part(app: &AppHandle, active: &mut Active, part: Part, until: Option<D
         .dir()
         .join(format!("{}.part{}.pcm", active.id, part.index));
     let recording = part.recording;
+    let (app, id) = (app.clone(), active.id.clone());
     active.parts.push(std::thread::spawn(move || {
         let origin = recording.origin();
         let (result, mut audio) = recording.finish(FINISH_TIMEOUT);
@@ -747,19 +798,26 @@ fn finish_part(app: &AppHandle, active: &mut Active, part: Part, until: Option<D
                 audio
             }
         };
-        let frames = write_pcm(&pcm, &audio).unwrap_or_else(|error| {
-            tracing::error!(%error, "cannot save part of a voice note");
-            // A partial file would not match its frame count.
-            let _ = fs::remove_file(&pcm);
-            0
-        });
+        let rate = audio.sample_rate.hz();
+        let (frames, unsaved) = match write_pcm(&pcm, &audio) {
+            Ok(frames) => (frames, None),
+            Err(error) => {
+                tracing::error!(%error, "cannot save part of a voice note");
+                // A partial file would not match its frame count.
+                let _ = fs::remove_file(&pcm);
+                // The disk is likely full: stop adding to it, and say so.
+                app.state::<App>().recorder.storage_failed(&app, &id, &error);
+                (0, Some(audio))
+            }
+        };
         PartOut {
             segments,
             pcm,
-            rate: audio.sample_rate.hz(),
+            rate,
             frames,
             clock_ms,
             error,
+            unsaved,
         }
     }));
 }
@@ -825,6 +883,15 @@ fn spawn_ticker(app: AppHandle, id: String) {
                     recorder.stop(&app);
                     return;
                 }
+                // A part that hears nothing more must not keep the clock
+                // running until the next rollover.
+                let lost = part.capture.device_lost();
+                if lost || part.recording.ended() {
+                    inner.error = recover(&app, active, lost, running);
+                    drop(inner);
+                    recorder.changed(&app);
+                    continue;
+                }
                 if f32::from_bits(part.level.load(Ordering::Relaxed)) < QUIET_LEVEL {
                     part.quiet_since.get_or_insert_with(Instant::now);
                 } else {
@@ -872,6 +939,26 @@ fn save_audio(wav: &Path, parts: &[PartOut]) -> Result<(u32, u64, Vec<f32>), Str
     }
 }
 
+/// Writes the parts whose audio could not be written while recording. Returns
+/// the error to show if one still cannot be: its audio is then lost.
+fn write_unsaved(parts: &mut [PartOut]) -> Option<String> {
+    let mut lost = None;
+    for part in parts.iter_mut() {
+        let Some(audio) = part.unsaved.take() else {
+            continue;
+        };
+        match write_pcm(&part.pcm, &audio) {
+            Ok(frames) => part.frames = frames,
+            Err(error) => {
+                tracing::error!(%error, "cannot save part of a voice note");
+                let _ = fs::remove_file(&part.pcm);
+                lost = Some(format!("Part of the recording could not be saved ({error}), so its audio is missing"));
+            }
+        }
+    }
+    lost
+}
+
 /// The parts with audio on disk, as a note keeps them until they are joined.
 fn pending(parts: &[PartOut]) -> Vec<notes::PendingPart> {
     parts
@@ -908,6 +995,7 @@ pub fn retry_pending(app: AppHandle) {
                             frames,
                             clock_ms: 0,
                             error: None,
+                            unsaved: None,
                         })
                     })
                     .collect();
@@ -948,11 +1036,12 @@ fn finish(app: &AppHandle, mut active: Active) {
     };
     recorder.step(app, &active.id, "Saving the recording");
 
-    let parts: Vec<PartOut> = active
+    let mut parts: Vec<PartOut> = active
         .parts
         .drain(..)
         .filter_map(|part| part.join().ok())
         .collect();
+    let unsaved_error = write_unsaved(&mut parts);
     let dir = state.notes.dir().to_owned();
     let audio_name = format!("{}.wav", active.id);
     let (saved, save_error) = match save_audio(&dir.join(&audio_name), &parts) {
@@ -1063,7 +1152,8 @@ fn finish(app: &AppHandle, mut active: Active) {
         note.title = title;
     }
     inner.saved = Some(note.id.clone());
-    inner.error = save_error
+    inner.error = unsaved_error
+        .or(save_error)
         .or_else(|| {
             failed.map(|error| format!("Part of the recording could not be transcribed: {error}"))
         })
@@ -1230,6 +1320,7 @@ mod tests {
             frames,
             clock_ms: 0,
             error: None,
+            unsaved: None,
         }
     }
 
@@ -1344,6 +1435,7 @@ mod tests {
                 frames,
                 clock_ms: 1_000,
                 error: None,
+                unsaved: None,
             },
         ];
         let (rate, frames, _) = write_wav(&dir.join("note.wav"), &parts).unwrap();
@@ -1352,6 +1444,33 @@ mod tests {
             frames.abs_diff(32_000) <= 2,
             "both seconds are kept: {frames}"
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn audio_that_could_not_be_written_is_written_when_the_note_is_saved() {
+        let dir = std::env::temp_dir().join(format!("viary-notes-unsaved-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("blocked"), "").unwrap();
+        let unsaved = |pcm: PathBuf| PartOut {
+            segments: Vec::new(),
+            pcm,
+            rate: 16_000,
+            frames: 0,
+            clock_ms: 0,
+            error: None,
+            unsaved: Some(AudioBuffer::new(NOTE_RATE, vec![0.5; 1_600])),
+        };
+        // Still cannot be written: the error says the audio is missing.
+        let mut parts = vec![unsaved(dir.join("blocked").join("a.pcm"))];
+        assert!(write_unsaved(&mut parts).unwrap().contains("could not be saved"));
+        assert_eq!(parts[0].frames, 0);
+        // Can be now: it joins the note like any other part.
+        let mut parts = vec![unsaved(dir.join("a.pcm"))];
+        assert_eq!(write_unsaved(&mut parts), None);
+        assert_eq!(parts[0].frames, 1_600);
+        assert!(parts[0].unsaved.is_none());
+        assert_eq!(part_places(&parts), vec![Place::Audio(0)]);
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -132,6 +132,17 @@ impl Recording {
         })
     }
 
+    /// Whether the listening has ended by itself (its session failed or cut
+    /// itself off, or the device was lost): it records nothing more.
+    pub fn ended(&self) -> bool {
+        self.end().is_some()
+    }
+
+    /// The capture time where the listening ended, once it has.
+    pub fn end(&self) -> Option<Duration> {
+        self.listening.end()
+    }
+
     /// The capture time of the recording's first sample. Its segments' times
     /// are capture times too.
     pub fn origin(&self) -> Duration {
@@ -480,6 +491,26 @@ mod tests {
         // Cut at the handover, every sample is in exactly one part.
         assert_eq!(a.samples.len() + b.samples.len(), spoken);
         assert!(result.unwrap().segments.iter().all(|s| s.end > handover));
+    }
+
+    #[test]
+    fn a_lost_microphone_ends_the_listening_at_once() {
+        // What a voice note's ticker looks for to go on without it.
+        let (microphone, input) = Microphone::fake(RATE);
+        let engine = engine(None, false);
+        let capture = microphone.capture(CaptureOptions::default()).unwrap();
+        let recording =
+            Recording::listen_on(&capture, &engine, AsrOptions::default(), MAX_RECORDING, None, |_, _| {})
+                .unwrap();
+        speak(&input, 1);
+        assert!(!recording.ended() && !capture.device_lost());
+        input.lose();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !recording.ended() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(capture.device_lost());
+        assert!(recording.ended());
     }
 
     #[test]
