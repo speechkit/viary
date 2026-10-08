@@ -247,8 +247,11 @@ mod tests {
             _: &AsrOptions,
             events: AsrEvents,
         ) -> Result<Box<dyn AsrStream>, SpeechError> {
+            // Stuck until the test releases it, or ends and drops the
+            // sender: a timeout here would fail the session early on a
+            // slow machine, where speaking the test audio takes longer.
             if let Some(gate) = &self.gate {
-                gate.lock().unwrap().recv_timeout(TIMEOUT).unwrap();
+                let _ = gate.lock().unwrap().recv();
             }
             if self.fail {
                 return Err(SpeechError::backend("counter", true, "connection failed"));
