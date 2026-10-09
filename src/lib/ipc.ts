@@ -194,6 +194,8 @@ export interface Snapshot {
   autostart: boolean;
   /** The GNOME session, talk shortcut, and typing method on Linux; null elsewhere. */
   desktop: Desktop | null;
+  /** The keyboard layout on Windows: whether Right Alt is AltGr. Null elsewhere. */
+  keyboard: { altGr: boolean } | null;
   families: [string, FamilyInfo][];
   punctLayout: string | null;
 }
@@ -402,7 +404,7 @@ export const api = {
   copy: (text: string) => invoke<void>("copy_text", { text }),
   pill: (action: PillAction) => invoke<void>("pill_action", { action }),
   fitPill: (width: number, height: number) => invoke<void>("fit_pill", { width, height }),
-  requestPermission: (kind: "accessibility" | "inputMonitoring" | "microphone") =>
+  requestPermission: (kind: "accessibility" | "inputMonitoring" | "microphone" | "taskbar") =>
     invoke<void>("request_permission", { kind }),
   openMain: (page: string) => invoke<void>("open_main", { page }),
   /** Opens Voice Notes and starts a recording, as ⌥⌘N does. */
