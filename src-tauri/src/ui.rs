@@ -27,15 +27,30 @@ const POPOVER_SIZE: (f64, f64) = (360.0, 560.0);
 pub enum TrayState {
     Idle,
     Listening,
-    Working,
+    Transcribing,
+    Polishing,
     Failed,
     /// Idle, with dictation paused from the tray.
     Paused,
+    /// Idle, with the voice engine still loading, as after login.
+    Loading,
+    /// Idle, but something is missing: the microphone, the talk key, a
+    /// permission, or a voice engine.
+    Attention,
 }
 
 impl From<u8> for TrayState {
     fn from(code: u8) -> Self {
-        [Self::Idle, Self::Listening, Self::Working, Self::Failed, Self::Paused]
+        [
+            Self::Idle,
+            Self::Listening,
+            Self::Transcribing,
+            Self::Polishing,
+            Self::Failed,
+            Self::Paused,
+            Self::Loading,
+            Self::Attention,
+        ]
             .into_iter()
             .find(|state| *state as u8 == code)
             .unwrap_or(Self::Idle)
@@ -84,6 +99,10 @@ pub fn set_app_icon() {
 /// Tells every window to reload what it shows from `get_state`.
 pub fn refresh(app: &AppHandle) {
     let _ = app.emit("state-changed", ());
+    // An engine loading, a permission granted: the icon may change too. On
+    // a thread of its own, so no caller's lock is held while it reads.
+    let redraw = app.clone();
+    std::thread::spawn(move || redraw_tray(&redraw));
     // GNOME shows the menu without asking first: keep it current.
     #[cfg(target_os = "linux")]
     crate::tray_menu::refresh(app);
@@ -161,62 +180,149 @@ fn tray_ink(template: bool) -> [u8; 3] {
 /// bar. Elsewhere Viary colors it.
 const TEMPLATE: bool = cfg!(target_os = "macos");
 
-/// The state the dictation last reported, and the one the icon shows.
+/// The state the dictation last reported.
 static DICTATION: AtomicU8 = AtomicU8::new(TrayState::Idle as u8);
-static SHOWN: AtomicU8 = AtomicU8::new(u8::MAX);
+/// The state and tooltip the icon shows, so it is drawn only on a change.
+static SHOWN: Mutex<Option<(TrayState, String)>> = Mutex::new(None);
 
-/// The tray icon for the dictation's `state`: the plain mark when idle,
-/// with a colored dot while listening (red), working (blue), or failed
-/// (amber); grayed and struck through while paused.
+/// What the icon shows while the dictation is `dictation`: the dictation
+/// first, then a pause, the engine loading, and anything missing.
+fn resolve(dictation: TrayState, paused: bool, loading: bool, attention: bool) -> TrayState {
+    match dictation {
+        TrayState::Idle if paused => TrayState::Paused,
+        TrayState::Idle if loading => TrayState::Loading,
+        TrayState::Idle if attention => TrayState::Attention,
+        state => state,
+    }
+}
+
+/// How a state is drawn: its dot, and whether the mark is grayed and
+/// struck through. On a dark bar (GNOME's, a dark taskbar or menu bar) the
+/// dots are lighter, as the design draws them.
+struct Look {
+    badge: Option<[u8; 3]>,
+    dim: bool,
+    struck: bool,
+}
+
+fn look(state: TrayState, dark: bool) -> Look {
+    let pick = |light: [u8; 3], on_dark: [u8; 3]| Some(if dark { on_dark } else { light });
+    let gray = if dark { [0x80; 3] } else { [0x8A; 3] };
+    let (badge, dim, struck) = match state {
+        TrayState::Idle => (None, false, false),
+        TrayState::Listening => (pick([0xE0, 0x45, 0x2B], [0xFF, 0x5A, 0x36]), false, false),
+        TrayState::Transcribing | TrayState::Polishing => {
+            (pick([0x2F, 0x46, 0xC8], [0x7E, 0xA7, 0xFF]), false, false)
+        }
+        TrayState::Failed | TrayState::Attention => {
+            (pick([0xD0, 0x8A, 0x00], [0xF5, 0xC2, 0x11]), false, false)
+        }
+        TrayState::Loading => (Some(gray), true, false),
+        TrayState::Paused => (None, true, true),
+    };
+    Look { badge, dim, struck }
+}
+
+/// "for 12 more minutes", "for 1 hour": what is left of a pause.
+fn paused_for(left_ms: u64) -> String {
+    let minutes = left_ms.div_ceil(60_000).max(1);
+    match minutes {
+        1 => "for 1 more minute".into(),
+        60 => "for 1 hour".into(),
+        m if m > 60 && m % 60 == 0 => format!("for {} hours", m / 60),
+        m => format!("for {m} more minutes"),
+    }
+}
+
+/// What Viary is doing, as the tooltip says it after "Viary: ": "hold
+/// Right Alt", "listening", "loading SenseVoice", "microphone blocked".
+fn status_text(app: &AppHandle, state: TrayState, attention: Option<&str>) -> String {
+    let viary = app.state::<App>();
+    match state {
+        TrayState::Idle => format!("hold {}", crate::dictation::key_name(viary.settings().hotkey)),
+        TrayState::Listening => "listening".into(),
+        TrayState::Transcribing => "transcribing".into(),
+        TrayState::Polishing => "polishing".into(),
+        TrayState::Failed => "dictation failed · audio kept".into(),
+        TrayState::Attention => attention.unwrap_or("needs attention").into(),
+        TrayState::Loading => match viary.engines.status().loading {
+            Some(id) => format!("loading {}", crate::dictation::engine_name(&viary.settings(), &id)),
+            None => "loading".into(),
+        },
+        TrayState::Paused => match viary.pause.get().and_then(|p| p.until) {
+            Some(until) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                format!("paused {}", paused_for(until.saturating_sub(now)))
+            }
+            None => "paused until you resume".into(),
+        },
+    }
+}
+
+/// What is missing for dictation, if anything.
+fn attention(app: &AppHandle) -> Option<&'static str> {
+    let viary = app.state::<App>();
+    let hotkey = viary.hotkey.get().is_some_and(crate::platform::hotkey::HotkeyListener::is_active);
+    if let Some(missing) = crate::platform::permissions::missing(hotkey) {
+        return Some(missing);
+    }
+    let engines = viary.engines.status();
+    (engines.active.is_none() && engines.loading.is_none()).then_some("choose a voice engine")
+}
+
+/// The state the icon shows now, and its tooltip after "Viary: ".
+pub fn tray_status(app: &AppHandle) -> (TrayState, String) {
+    let viary = app.state::<App>();
+    let missing = attention(app);
+    let state = resolve(
+        TrayState::from(DICTATION.load(Ordering::SeqCst)),
+        viary.pause.get().is_some(),
+        viary.engines.status().loading.is_some(),
+        missing.is_some(),
+    );
+    (state, status_text(app, state, missing))
+}
+
+/// The tray icon for the dictation's `state`.
 pub fn set_tray(app: &AppHandle, state: TrayState) {
     DICTATION.store(state as u8, Ordering::SeqCst);
     redraw_tray(app);
 }
 
-/// Draws the icon again, after the dictation or a pause changed.
+/// Draws the icon and its tooltip again if what they show changed.
 pub fn redraw_tray(app: &AppHandle) {
-    let state = TrayState::from(DICTATION.load(Ordering::SeqCst));
-    let paused = app.state::<App>().pause.get();
-    let shown = if state == TrayState::Idle && paused.is_some() {
-        TrayState::Paused
-    } else {
-        state
-    };
-    if SHOWN.swap(shown as u8, Ordering::SeqCst) == shown as u8 && shown != TrayState::Paused {
-        return;
-    }
+    // Before the icon exists there is nothing to draw, and nothing to
+    // remember as drawn.
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
-    let badge = match shown {
-        TrayState::Idle | TrayState::Paused => None,
-        TrayState::Listening => Some([0xE0, 0x45, 0x2B]),
-        TrayState::Working => Some([0x2F, 0x46, 0xC8]),
-        TrayState::Failed => Some([0xD0, 0x8A, 0x00]),
+    let (state, text) = tray_status(app);
+    {
+        let mut shown = crate::lock(&SHOWN);
+        if shown.as_ref().is_some_and(|(s, t)| *s == state && *t == text) {
+            return;
+        }
+        *shown = Some((state, text.clone()));
+    }
+    let Look { badge, dim, struck } = look(state, dark_tray());
+    // A template image follows the menu bar's color but loses the dot's
+    // and the gray.
+    let template = TEMPLATE && badge.is_none() && !dim;
+    let ink = if dim {
+        if dark_tray() { [0x80; 3] } else { [0x8A; 3] }
+    } else {
+        tray_ink(template)
     };
-    let paused_ink = shown == TrayState::Paused;
-    // A template image follows the menu bar's color but loses the dot's.
-    let template = TEMPLATE && badge.is_none();
-    let ink = if paused_ink { [0x8A; 3] } else { tray_ink(template) };
     let size = 44;
     let _ = tray.set_icon(Some(Image::new_owned(
-        icons::tray(size, ink, badge, paused_ink),
+        icons::tray(size, ink, badge, struck),
         size,
         size,
     )));
-    let _ = tray.set_icon_as_template(template && !paused_ink);
-    let key = crate::dictation::key_name(app.state::<App>().settings().hotkey);
-    let tip = match shown {
-        TrayState::Idle => format!("Viary: hold {key}"),
-        TrayState::Listening => "Viary: listening".into(),
-        TrayState::Working => "Viary: working".into(),
-        TrayState::Failed => "Viary: needs attention".into(),
-        TrayState::Paused => match paused.and_then(|p| p.until) {
-            Some(_) => "Viary: paused for a while".into(),
-            None => "Viary: paused".into(),
-        },
-    };
-    let _ = tray.set_tooltip(Some(tip));
+    let _ = tray.set_icon_as_template(template);
+    let _ = tray.set_tooltip(Some(format!("Viary: {text}")));
 }
 
 pub fn tray_icon() -> Image<'static> {
@@ -477,4 +583,36 @@ pub fn toggle_popover(app: &AppHandle, icon: tauri::Rect) {
     refresh(app);
     let _ = popover.show();
     let _ = popover.set_focus();
+}
+
+#[cfg(test)]
+mod tray_tests {
+    use super::*;
+
+    #[test]
+    fn a_dictation_shows_over_a_pause_and_a_pause_over_loading() {
+        assert_eq!(resolve(TrayState::Listening, true, true, true), TrayState::Listening);
+        assert_eq!(resolve(TrayState::Idle, true, true, true), TrayState::Paused);
+        assert_eq!(resolve(TrayState::Idle, false, true, true), TrayState::Loading);
+        assert_eq!(resolve(TrayState::Idle, false, false, true), TrayState::Attention);
+        assert_eq!(resolve(TrayState::Idle, false, false, false), TrayState::Idle);
+    }
+
+    #[test]
+    fn dark_bars_get_the_lighter_dots() {
+        assert_eq!(look(TrayState::Listening, true).badge, Some([0xFF, 0x5A, 0x36]));
+        assert_eq!(look(TrayState::Listening, false).badge, Some([0xE0, 0x45, 0x2B]));
+        assert_eq!(look(TrayState::Attention, true).badge, Some([0xF5, 0xC2, 0x11]));
+        let paused = look(TrayState::Paused, true);
+        assert!(paused.dim && paused.struck && paused.badge.is_none());
+        assert!(look(TrayState::Loading, false).dim);
+    }
+
+    #[test]
+    fn a_pause_says_what_is_left() {
+        assert_eq!(paused_for(60 * 60_000), "for 1 hour");
+        assert_eq!(paused_for(12 * 60_000 - 5_000), "for 12 more minutes");
+        assert_eq!(paused_for(10_000), "for 1 more minute");
+        assert_eq!(paused_for(120 * 60_000), "for 2 hours");
+    }
 }

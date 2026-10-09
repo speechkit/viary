@@ -80,3 +80,14 @@ pub fn open_settings(kind: &str) {
         tracing::warn!(%error, "cannot open System Settings");
     }
 }
+
+/// What is missing for dictation, for the menu bar icon, if anything.
+pub fn missing(hotkey_active: bool) -> Option<&'static str> {
+    if !hotkey_active {
+        Some("allow Input Monitoring")
+    } else if !can_type() {
+        Some("allow Accessibility to paste")
+    } else {
+        None
+    }
+}

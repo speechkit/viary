@@ -126,7 +126,8 @@ impl PillView {
     fn tray(&self) -> TrayState {
         match self {
             Self::Listening { .. } | Self::HandsFree { .. } => TrayState::Listening,
-            Self::Transcribing { .. } | Self::Polishing => TrayState::Working,
+            Self::Transcribing { .. } => TrayState::Transcribing,
+            Self::Polishing => TrayState::Polishing,
             Self::Failed { .. } => TrayState::Failed,
             _ => TrayState::Idle,
         }
