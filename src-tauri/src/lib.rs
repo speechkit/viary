@@ -424,9 +424,8 @@ fn set_preferences(app: AppHandle, state: State<'_, App>, prefs: Preferences) ->
         let parsed = provider
             .parse::<ExecutionProvider>()
             .map_err(|e| engines::describe(&e))?;
-        // CUDA needs an NVIDIA GPU; on a Mac only the CPU and CoreML run.
-        if cfg!(target_os = "macos") && parsed == ExecutionProvider::Cuda {
-            return Err(format!("{provider} is not available on this Mac"));
+        if !engines::PROVIDERS.contains(&parsed) {
+            return Err(format!("{provider} is not available on this computer"));
         }
     }
     let inference_changed = prefs.provider.is_some() || prefs.threads.is_some();

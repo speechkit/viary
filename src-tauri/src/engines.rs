@@ -22,10 +22,31 @@ use speechkit::{
         OpenAiTranscription, OpenAiTranscriptionConfig,
     },
     sherpa::{
-        AsrConfig, AsrFamily, Inference, Punctuation, PunctuationConfig, PunctuationFamily,
-        SileroVadConfig,
+        AsrConfig, AsrFamily, Inference, Provider as ExecutionProvider, Punctuation,
+        PunctuationConfig, PunctuationFamily, SileroVadConfig,
     },
 };
+
+/// Where Viary's sherpa-onnx can run models on this system. It links the
+/// static CPU build, so CUDA (which needs the shared GPU build) is never
+/// here, and CoreML is Apple's.
+pub const PROVIDERS: &[ExecutionProvider] = if cfg!(target_os = "macos") {
+    &[ExecutionProvider::Cpu, ExecutionProvider::CoreMl]
+} else {
+    &[ExecutionProvider::Cpu]
+};
+
+/// The provider named in the settings, or the CPU when this system cannot
+/// run it: settings copied from a Mac may name CoreML.
+fn provider(name: &str) -> Result<ExecutionProvider, SpeechError> {
+    let chosen: ExecutionProvider = name.parse()?;
+    if PROVIDERS.contains(&chosen) {
+        Ok(chosen)
+    } else {
+        tracing::warn!(provider = name, "not available on this system; running models on the CPU");
+        Ok(ExecutionProvider::Cpu)
+    }
+}
 
 use crate::{
     dictionary::{self, Use},
@@ -500,7 +521,7 @@ fn build_local(
     let family: AsrFamily = model.family.parse()?;
     let meta = family_info(family);
     let inference = Inference::default()
-        .with_provider(settings.provider.parse()?)
+        .with_provider(provider(&settings.provider)?)
         .with_threads(settings.threads.clamp(1, 16));
     let dir = model.path.as_path();
     let config = if family == AsrFamily::StreamingTransducer {
@@ -917,6 +938,18 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_provider_this_system_lacks_runs_on_the_cpu() {
+        assert_eq!(provider("cpu").unwrap(), ExecutionProvider::Cpu);
+        assert_eq!(provider("cuda").unwrap(), ExecutionProvider::Cpu);
+        let coreml = provider("coreml").unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(coreml, ExecutionProvider::CoreMl);
+        } else {
+            assert_eq!(coreml, ExecutionProvider::Cpu);
+        }
+    }
     use super::*;
 
     struct CheckedPunctuation {
