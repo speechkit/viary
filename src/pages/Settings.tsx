@@ -6,6 +6,7 @@ import { ErrorBanner, Switch } from "../components/Controls";
 import { Icon, Kbd } from "../components/Icons";
 import { api, errorText, type Desktop, type Hotkey, type Snapshot, type Typing } from "../lib/ipc";
 import { PLATFORM, type Platform } from "../lib/platform";
+import { KeyTest } from "../windows/Setup";
 
 const btn = "inline-flex h-8 shrink-0 items-center whitespace-nowrap gap-2 rounded-lg border border-edge bg-white px-3 text-[13px] font-medium text-ink";
 
@@ -95,8 +96,16 @@ export function SettingsPage({ s }: { s: Snapshot }) {
 
       <h2 className="m-0 text-xs font-semibold tracking-[.04em] text-faint uppercase">Dictation key</h2>
       <div role="radiogroup" aria-label="Dictation key" className="grid grid-cols-3 gap-3.5">
-        {KEYS[PLATFORM].map(([key, label, text]) => {
+        {KEYS[PLATFORM].map(([key, label, plain]) => {
           const on = s.settings.hotkey === key;
+          // On an AltGr layout, Right Alt types characters: Ctrl + Win it is.
+          const text = !s.keyboard?.altGr
+            ? plain
+            : key === "rightAlt"
+              ? "The Alt key right of the space bar. It types é, @… on your keyboard layout."
+              : key === "ctrlWin"
+                ? "Both keys left of the space bar, held together. Recommended for your keyboard."
+                : plain;
           return (
             <button
               key={key}
@@ -119,12 +128,7 @@ export function SettingsPage({ s }: { s: Snapshot }) {
         })}
       </div>
       <span className="text-[13px] text-muted">Hold the key while you speak and release it to insert. Double-tap it for hands-free: Viary listens until you tap it again.</span>
-      {PLATFORM === "windows" && (
-        <span className="rounded-[10px] border border-[#F0DDB6] bg-[#FFF6E6] px-4 py-3 text-[13px] leading-[1.45] text-[#6B4A00]">
-          On keyboards where Right Alt is AltGr (German, French, Polish…), choose Ctrl + Win so accented letters keep
-          working. Win + H stays with Windows voice typing.
-        </span>
-      )}
+      {PLATFORM === "windows" && <WindowsKey s={s} />}
 
       {PLATFORM === "windows" ? <WindowsPermissions s={s} /> : <MacPermissions s={s} />}
       <Startup s={s} />
@@ -272,6 +276,55 @@ function LinuxSettings({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
   );
 }
 
+const note = "rounded-[10px] border border-[#F0DDB6] bg-[#FFF6E6] px-4 py-3 text-[13px] leading-[1.45] text-[#6B4A00]";
+
+/** Windows: whether the layout makes Right Alt a poor talk key, whether
+ *  the keyboard hook runs, and a test of the key. */
+function WindowsKey({ s }: { s: Snapshot }) {
+  const [testing, setTesting] = useState(false);
+  const altGr = s.keyboard?.altGr ?? false;
+  return (
+    <>
+      {altGr && s.settings.hotkey === "rightAlt" && (
+        <div className={note + " flex items-center gap-3"}>
+          <span className="grow">
+            Your keyboard layout uses Right Alt as AltGr for characters like é and @. Holding it to talk gets in the way of
+            typing them; Ctrl + Win does not.
+          </span>
+          <button type="button" className={btn} onClick={() => api.setPreferences({ hotkey: "ctrlWin" })}>
+            Use Ctrl + Win
+          </button>
+        </div>
+      )}
+      {!s.hotkeyActive && (
+        <div className={note}>
+          Viary can’t see the keyboard right now, so {s.hotkeyName} does nothing. Quit Viary from the tray and open it
+          again.
+        </div>
+      )}
+      {testing ? (
+        <div className="flex flex-col gap-2">
+          <KeyTest key={s.hotkeyName} name={s.hotkeyName} />
+          <span className="flex items-center gap-3 text-[13px] text-muted">
+            <span className="grow">While this test is open, {s.hotkeyName} starts no dictation.</span>
+            <button type="button" className={btn} onClick={() => setTesting(false)}>
+              Done
+            </button>
+          </span>
+        </div>
+      ) : (
+        s.hotkeyActive && (
+          <span>
+            <button type="button" className={btn} onClick={() => setTesting(true)}>
+              Test {s.hotkeyName}
+            </button>
+          </span>
+        )
+      )}
+    </>
+  );
+}
+
 /** Windows asks for nothing but the microphone switch. */
 function WindowsPermissions({ s }: { s: Snapshot }) {
   return (
@@ -298,6 +351,18 @@ function WindowsPermissions({ s }: { s: Snapshot }) {
       <span className="text-[13px] text-muted">
         Viary cannot type into apps running as administrator; there, the text stays on the clipboard.
       </span>
+
+      <h2 className={h2}>Tray icon</h2>
+      <div className={card}>
+        <Row
+          title="Keep Viary in view"
+          text="Windows hides new tray icons under ^. Turn Viary on under Taskbar settings › Other system tray icons, or drag it onto the taskbar."
+        >
+          <button type="button" className={btn} onClick={() => api.requestPermission("taskbar")}>
+            Taskbar Settings
+          </button>
+        </Row>
+      </div>
     </>
   );
 }

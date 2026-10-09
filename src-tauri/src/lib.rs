@@ -194,6 +194,8 @@ struct Snapshot {
     paused: Option<pause::Paused>,
     /// The session, shortcut, and typing method on Linux; null elsewhere.
     desktop: serde_json::Value,
+    /// The keyboard layout on Windows; null elsewhere.
+    keyboard: Option<platform::Keyboard>,
     autostart: bool,
     /// Each local model's family, as the Voice engine screen describes it.
     families: Vec<(String, engines::FamilyInfo)>,
@@ -223,6 +225,7 @@ fn get_state(app: AppHandle, state: State<'_, App>) -> Snapshot {
         pill: lock(&state.pill).clone(),
         paused: state.pause.get(),
         desktop: platform::desktop(),
+        keyboard: platform::keyboard(),
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         families,
         punct_layout,

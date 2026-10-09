@@ -348,7 +348,7 @@ const KEYS: { key: Hotkey; caps: string[]; label: string; note: string }[] = [
 
 /** Press the talk key to see Viary hear it. While shown, the key only
  *  reports itself: no dictation, no hints. */
-function KeyTest({ name, toggle = false }: { name: string; toggle?: boolean }) {
+export function KeyTest({ name, toggle = false }: { name: string; toggle?: boolean }) {
   useEffect(() => {
     api.setKeyTest(true);
     return () => {
@@ -393,6 +393,10 @@ function KeyTest({ name, toggle = false }: { name: string; toggle?: boolean }) {
 
 function TalkKeyStep({ s }: { s: Snapshot }) {
   const name = KEYS.find((k) => k.key === s.settings.hotkey)?.label ?? s.hotkeyName;
+  // On AltGr layouts Right Alt types characters: Ctrl + Win is the one to use.
+  const altGr = s.keyboard?.altGr ?? false;
+  const note = (k: (typeof KEYS)[number]) =>
+    altGr ? (k.key === "ctrlWin" ? "Recommended for your keyboard" : "Types é, @… on your keyboard") : k.note;
   return (
     <>
       <Heading step={1} title="Pick your talk key">
@@ -420,7 +424,7 @@ function TalkKeyStep({ s }: { s: Snapshot }) {
                 ))}
               </span>
               {k.label}
-              <small className="text-xs font-normal text-faint">{k.note}</small>
+              <small className="text-xs font-normal text-faint">{note(k)}</small>
             </button>
           );
         })}
@@ -436,10 +440,12 @@ function TalkKeyStep({ s }: { s: Snapshot }) {
           <small className="text-xs font-normal text-faint">Coming soon</small>
         </button>
       </div>
-      <div className="rounded-[10px] border border-[#F0DDB6] bg-[#FFF6E6] px-4 py-3 text-[13px] leading-[1.45] text-[#6B4A00]">
-        On keyboards where Right Alt is AltGr (German, French, Polish…), choose Ctrl + Win instead so accented letters keep
-        working. Win + H stays with Windows voice typing.
-      </div>
+      {altGr && (
+        <div className="rounded-[10px] border border-[#F0DDB6] bg-[#FFF6E6] px-4 py-3 text-[13px] leading-[1.45] text-[#6B4A00]">
+          Your keyboard layout uses Right Alt as AltGr, for characters like é and @, so Viary suggests Ctrl + Win
+          instead. Win + H stays with Windows voice typing.
+        </div>
+      )}
       <KeyTest key={name} name={name} />
       <div className="flex items-center gap-3 text-sm">
         <span className="grow">Start Viary when I sign in to Windows</span>

@@ -50,6 +50,24 @@ mod desktop {
 #[cfg(not(target_os = "linux"))]
 pub use desktop::*;
 
+/// The keyboard layout in use, where it bears on the talk key.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Keyboard {
+    /// Right Alt is AltGr, which types characters (Windows).
+    pub alt_gr: bool,
+}
+
+/// The keyboard layout, on Windows, where Right Alt can be the talk key.
+pub fn keyboard() -> Option<Keyboard> {
+    #[cfg(target_os = "windows")]
+    return Some(Keyboard {
+        alt_gr: windows::layout_has_altgr(),
+    });
+    #[cfg(not(target_os = "windows"))]
+    None
+}
+
 /// The system Viary was built for, as the web views name it.
 pub const NAME: &str = if cfg!(target_os = "macos") {
     "macos"

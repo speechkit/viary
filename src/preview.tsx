@@ -112,6 +112,8 @@ const snapshot: Snapshot = {
   pill: { kind: "idle" },
   paused: null,
   autostart: true,
+  // ?altgr=1: a German or French layout, where Right Alt is AltGr.
+  keyboard: PLATFORM === "windows" ? { altGr: params.get("altgr") === "1" } : null,
   desktop:
     PLATFORM === "linux"
       ? {
