@@ -725,6 +725,8 @@ function ShortcutStep({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
   const { mode, bound } = desktop.shortcut;
   const toggle = mode === "toggle";
   const x11 = desktop.session === "x11";
+  // Once bound, the keys GNOME has, which the user may have changed.
+  const talk = bound ? s.hotkeyName.split("+") : TALK;
   return (
     <>
       <Heading step={1} title="Set your talk shortcut">
@@ -738,7 +740,7 @@ function ShortcutStep({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
             <span>Talk</span>
             <span className={sub}>{toggle ? "Press to start, press again to type" : "Hold to speak, release to type"}</span>
           </div>
-          <Keys keys={TALK} />
+          <Keys keys={talk} />
         </div>
         {!toggle && (
           <div className={row}>
@@ -746,7 +748,7 @@ function ShortcutStep({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
               <span>Hands-free</span>
               <span className={sub}>Tap twice to start, once to stop</span>
             </div>
-            <Keys keys={TALK} />
+            <Keys keys={talk} />
             <span className={sub}>×2</span>
           </div>
         )}

@@ -50,17 +50,28 @@ fn mark(text: &str) -> isize {
 }
 
 /// Files and images first: an app copying an image also offers HTML
-/// pointing at it, and Files offers the paths as text.
-fn read(c: &mut Clipboard) -> Option<Content> {
-    if let Ok(files) = c.get().file_list()
+/// pointing at it, and Files offers the paths as text. Only the best format
+/// the owner offers is read: each read is a round trip to it, and an image
+/// is decoded. Unknown offers (the owner did not say) try each in turn.
+fn read(c: &mut Clipboard, targets: Option<&[String]>) -> Option<Content> {
+    let offers = |format: &str| targets.is_none_or(|t| t.iter().any(|offered| offered == format));
+    if targets.is_some_and(<[String]>::is_empty) {
+        return None;
+    }
+    if offers("text/uri-list")
+        && let Ok(files) = c.get().file_list()
         && !files.is_empty()
     {
         return Some(Content::Files(files));
     }
-    if let Ok(image) = c.get().image() {
+    if offers("image/png")
+        && let Ok(image) = c.get().image()
+    {
         return Some(Content::Image(image));
     }
-    if let Ok(html) = c.get().html() {
+    if offers("text/html")
+        && let Ok(html) = c.get().html()
+    {
         return Some(Content::Html {
             html,
             text: c.get_text().ok(),
@@ -70,7 +81,8 @@ fn read(c: &mut Clipboard) -> Option<Content> {
 }
 
 pub fn save() -> Saved {
-    Saved(with(read).flatten())
+    let targets = super::x11::clipboard_targets();
+    Saved(with(|c| read(c, targets.as_deref())).flatten())
 }
 
 fn write(text: &str, transient: bool) -> isize {

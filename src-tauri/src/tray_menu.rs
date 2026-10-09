@@ -43,41 +43,117 @@ const LANGUAGES: [(Language, &str, &str); 3] = [
     (Language::Zh, "lang:zh", "中文"),
 ];
 
-pub fn refresh(app: &AppHandle) {
-    match build(app) {
-        Ok(menu) => {
-            if let Some(tray) = app.tray_by_id(ui::TRAY_ID) {
-                let _ = tray.set_menu(Some(menu));
-            }
-        }
-        Err(error) => tracing::warn!(%error, "cannot build the tray menu"),
-    }
+/// What the menu shows that can change. The menu is replaced only when
+/// this does: replacing it closes it if it is open, and on Linux every
+/// state change asks for it.
+#[derive(Clone, PartialEq)]
+struct Content {
+    key: String,
+    /// The state, as GNOME's menu says it (Linux).
+    status: String,
+    polish: bool,
+    translate: bool,
+    translate_to: String,
+    language: Language,
+    microphone: Option<String>,
+    microphones: Vec<String>,
+    /// Each engine's id and name.
+    engines: Vec<(String, String)>,
+    active: Option<String>,
+    paused: bool,
 }
 
-pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
+/// What the menu in use shows.
+static SHOWN: Mutex<Option<Content>> = Mutex::new(None);
+
+fn content(app: &AppHandle) -> Content {
     let state = app.state::<App>();
     let settings = state.settings();
-    let key = dictation::key_name(settings.hotkey);
-    let separator = || PredefinedMenuItem::separator(app);
-    let menu = Menu::new(app)?;
-
-    if cfg!(target_os = "linux") {
-        // GNOME shows no tooltip: the menu says what state Viary is in,
-        // as the tooltip would.
-        let status = match ui::tray_status(app) {
-            (ui::TrayState::Idle, _) => match state.engines.status().active {
+    let engines = state.engines.status();
+    // GNOME shows no tooltip: the menu says what state Viary is in, as the
+    // tooltip would.
+    let status = if cfg!(target_os = "linux") {
+        match ui::tray_status(app) {
+            (ui::TrayState::Idle, _) => match &engines.active {
                 Some(info) if info.on_device => "Ready · on-device".to_owned(),
                 Some(info) => format!("Ready · {}", info.kind),
                 None => "No voice engine".to_owned(),
             },
             (_, text) => sentence(&text),
-        };
-        menu.append(&MenuItem::with_id(app, "status", status, false, None::<&str>)?)?;
+        }
+    } else {
+        String::new()
+    };
+    let mut ids: Vec<String> = settings.local_models.iter().map(|m| format!("local:{}", m.id)).collect();
+    ids.extend(
+        [OPENAI, DASHSCOPE]
+            .into_iter()
+            .filter(|id| dictation::cloud_ready(&settings, id))
+            .map(str::to_owned),
+    );
+    Content {
+        key: dictation::hotkey_name(settings.hotkey),
+        status,
+        polish: settings.polish.enabled,
+        translate: settings.polish.translate,
+        translate_to: settings.polish.translate_to.clone(),
+        language: settings.language,
+        microphones: microphones(app),
+        engines: ids
+            .into_iter()
+            .map(|id| {
+                let name = dictation::engine_name(&settings, &id);
+                (id, name)
+            })
+            .collect(),
+        active: engines.active.map(|info| info.id),
+        paused: state.pause.get().is_some(),
+        microphone: settings.microphone,
+    }
+}
+
+/// Puts the menu up to date, if what it shows changed.
+pub fn refresh(app: &AppHandle) {
+    update(app, false);
+}
+
+/// Replaces the menu; when `force`, even if nothing it shows changed, as
+/// after a click, which toggles a check item by itself.
+fn update(app: &AppHandle, force: bool) {
+    let content = content(app);
+    if !force && lock(&SHOWN).as_ref() == Some(&content) {
+        return;
+    }
+    match build_from(app, &content) {
+        Ok(menu) => {
+            if let Some(tray) = app.tray_by_id(ui::TRAY_ID) {
+                let _ = tray.set_menu(Some(menu));
+            }
+            *lock(&SHOWN) = Some(content);
+        }
+        Err(error) => tracing::warn!(%error, "cannot build the tray menu"),
+    }
+}
+
+/// The menu for the tray icon being built.
+pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
+    let content = content(app);
+    let menu = build_from(app, &content)?;
+    *lock(&SHOWN) = Some(content);
+    Ok(menu)
+}
+
+fn build_from(app: &AppHandle, content: &Content) -> tauri::Result<Menu<Wry>> {
+    let key = &content.key;
+    let separator = || PredefinedMenuItem::separator(app);
+    let menu = Menu::new(app)?;
+
+    if cfg!(target_os = "linux") {
+        menu.append(&MenuItem::with_id(app, "status", &content.status, false, None::<&str>)?)?;
         menu.append(&MenuItem::with_id(app, "hint", format!("Hold {key} to talk"), false, None::<&str>)?)?;
         menu.append(&separator()?)?;
-        let polish = &settings.polish;
-        menu.append(&CheckMenuItem::with_id(app, "polish", "Polish transcripts", true, polish.enabled, None::<&str>)?)?;
-        menu.append(&CheckMenuItem::with_id(app, "translate", format!("Translate to {}", polish.translate_to), true, polish.translate, None::<&str>)?)?;
+        menu.append(&CheckMenuItem::with_id(app, "polish", "Polish transcripts", true, content.polish, None::<&str>)?)?;
+        menu.append(&CheckMenuItem::with_id(app, "translate", format!("Translate to {}", content.translate_to), true, content.translate, None::<&str>)?)?;
         menu.append(&separator()?)?;
     } else {
         menu.append(&MenuItem::with_id(app, "hands-free", format!("Start hands-free\t{key} ×2"), true, None::<&str>)?)?;
@@ -87,33 +163,24 @@ pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 
     let language = Submenu::with_id(app, "language", "Language", true)?;
     for (value, id, label) in LANGUAGES {
-        language.append(&CheckMenuItem::with_id(app, id, label, true, settings.language == value, None::<&str>)?)?;
+        language.append(&CheckMenuItem::with_id(app, id, label, true, content.language == value, None::<&str>)?)?;
     }
     menu.append(&language)?;
 
     let microphone = Submenu::with_id(app, "microphone", "Microphone", true)?;
-    microphone.append(&CheckMenuItem::with_id(app, DEFAULT_MIC, "Default", true, settings.microphone.is_none(), None::<&str>)?)?;
-    for name in microphones(app) {
-        let on = settings.microphone.as_deref() == Some(name.as_str());
-        microphone.append(&CheckMenuItem::with_id(app, format!("mic:{name}"), &name, true, on, None::<&str>)?)?;
+    microphone.append(&CheckMenuItem::with_id(app, DEFAULT_MIC, "Default", true, content.microphone.is_none(), None::<&str>)?)?;
+    for name in &content.microphones {
+        let on = content.microphone.as_deref() == Some(name.as_str());
+        microphone.append(&CheckMenuItem::with_id(app, format!("mic:{name}"), name, true, on, None::<&str>)?)?;
     }
     menu.append(&microphone)?;
 
     let engine = Submenu::with_id(app, "engine", "Voice engine", true)?;
-    let active = state.engines.status().active.map(|info| info.id);
-    let mut ids: Vec<String> = settings.local_models.iter().map(|m| format!("local:{}", m.id)).collect();
-    ids.extend(
-        [OPENAI, DASHSCOPE]
-            .into_iter()
-            .filter(|id| dictation::cloud_ready(&settings, id))
-            .map(str::to_owned),
-    );
-    for id in &ids {
-        let name = dictation::engine_name(&settings, id);
-        let on = active.as_deref() == Some(id.as_str());
+    for (id, name) in &content.engines {
+        let on = content.active.as_deref() == Some(id.as_str());
         engine.append(&CheckMenuItem::with_id(app, format!("engine:{id}"), name, true, on, None::<&str>)?)?;
     }
-    if !ids.is_empty() {
+    if !content.engines.is_empty() {
         engine.append(&separator()?)?;
     }
     engine.append(&MenuItem::with_id(app, "open:engine", "Voice engine settings…", true, None::<&str>)?)?;
@@ -123,7 +190,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     if cfg!(target_os = "linux") {
         menu.append(&MenuItem::with_id(app, "paste-last", "Paste last dictation", true, None::<&str>)?)?;
     }
-    if state.pause.get().is_some() {
+    if content.paused {
         menu.append(&MenuItem::with_id(app, "resume", "Resume dictation", true, None::<&str>)?)?;
     } else {
         let pause = Submenu::with_id(app, "pause", if cfg!(target_os = "linux") { "Pause" } else { "Pause dictation" }, true)?;
@@ -211,7 +278,8 @@ pub fn on_event(app: &AppHandle, event: MenuEvent) {
             }
         }
     }
-    refresh(app);
+    // A click toggles a check item by itself: put back what is so.
+    update(app, true);
 }
 
 fn toggle_polish(app: &AppHandle, field: &str, on: bool) {

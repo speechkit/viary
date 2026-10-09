@@ -259,7 +259,7 @@ fn paused_for(left_ms: u64) -> String {
 fn status_text(app: &AppHandle, state: TrayState, attention: Option<&str>) -> String {
     let viary = app.state::<App>();
     match state {
-        TrayState::Idle => format!("hold {}", crate::dictation::key_name(viary.settings().hotkey)),
+        TrayState::Idle => format!("hold {}", crate::dictation::hotkey_name(viary.settings().hotkey)),
         TrayState::Listening => "listening".into(),
         TrayState::Transcribing => "transcribing".into(),
         TrayState::Polishing => "polishing".into(),
@@ -403,6 +403,8 @@ const TIP_SIZE: (f64, f64) = (388.0, 200.0);
 
 /// Shows the first-launch tip above the tray, bottom right of the screen,
 /// where Windows notifications appear. It closes from its own buttons.
+/// Call it off the main thread: building a web view there from a command
+/// or event handler deadlocks on Windows.
 pub fn show_tray_tip(app: &AppHandle) -> tauri::Result<()> {
     if app.get_webview_window("tip").is_some() {
         return Ok(());
