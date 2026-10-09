@@ -202,7 +202,7 @@ pub fn bind() -> Result<(), String> {
             let bound = bound.shortcuts().iter().any(|s| s.id() == TALK);
             drop(portal);
             set_status(&listener, Status { mode: Mode::Hold, bound });
-            Ok(())
+            Ok::<(), String>(())
         }),
     }
 }

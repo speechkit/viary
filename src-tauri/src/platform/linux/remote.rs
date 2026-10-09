@@ -3,9 +3,12 @@
 //! that. A session is opened for each paste, so the top bar's sharing icon
 //! shows only while Viary types.
 
-use ashpd::desktop::{
-    PersistMode,
-    remote_desktop::{DeviceType, KeyState, RemoteDesktop, SelectDevicesOptions},
+use ashpd::{
+    desktop::{
+        PersistMode,
+        remote_desktop::{DeviceType, KeyState, RemoteDesktop, SelectDevicesOptions},
+    },
+    enumflags2::BitFlags,
 };
 
 use super::{change_prefs, prefs};
@@ -28,7 +31,7 @@ async fn session(keysyms: &[u32]) -> ashpd::Result<()> {
         .select_devices(
             &session,
             SelectDevicesOptions::default()
-                .set_devices(DeviceType::Keyboard)
+                .set_devices(BitFlags::from(DeviceType::Keyboard))
                 .set_persist_mode(PersistMode::ExplicitlyRevoked)
                 .set_restore_token(token.as_deref()),
         )
