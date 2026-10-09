@@ -17,9 +17,12 @@ function detect(): Platform {
 export const PLATFORM: Platform = detect();
 export const isMac = PLATFORM === "macos";
 
-/** Whether the command key is held: ⌘ on macOS, Ctrl elsewhere. */
-export function cmd(e: { metaKey: boolean; ctrlKey: boolean }): boolean {
-  return isMac ? e.metaKey : e.ctrlKey;
+/** Whether the command key is held: ⌘ on macOS, Ctrl elsewhere. Not while
+ *  AltGr is: Windows reports it as Ctrl+Alt, and AltGr+key types a
+ *  character (é, @, [) rather than a shortcut. */
+export function cmd(e: { metaKey: boolean; ctrlKey: boolean; getModifierState?: (key: string) => boolean }): boolean {
+  if (isMac) return e.metaKey;
+  return e.ctrlKey && !e.getModifierState?.("AltGraph");
 }
 
 type Modifier = "cmd" | "alt" | "shift";
@@ -43,8 +46,9 @@ export const THIS_COMPUTER = { macos: "this Mac", windows: "this PC", linux: "th
 /** The system's settings app. */
 export const SYSTEM_SETTINGS = { macos: "System Settings", windows: "Settings", linux: "Settings" }[PLATFORM];
 
-/** New voice note, from any app. */
-export const NEW_NOTE = shortcut(["cmd", "alt"], "N");
+/** New voice note, from any app. Windows reports AltGr as Ctrl+Alt, so
+ *  there it is Win+Alt+N, as lib.rs registers it. */
+export const NEW_NOTE = PLATFORM === "windows" ? "Win+Alt+N" : shortcut(["cmd", "alt"], "N");
 
 /** Mark the moment in a voice note. */
 export const MARK = shortcut(["cmd"], "M");

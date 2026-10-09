@@ -43,7 +43,11 @@ function status(s: Snapshot): Status {
   if (s.paused) return { label: "Paused", tone: "off", hint: `${pausedFor(s.paused.until)}. ${s.hotkeyName} does nothing until then.` };
   if (s.engine.loading) return { label: "Loading", tone: "busy", hint: "The voice engine is loading" };
   if (!s.engine.active) return { label: "No engine", tone: "off", hint: "Choose a voice engine to transcribe" };
-  if (!s.hotkeyActive && isMac) return { label: "Almost ready", tone: "attention", hint: `Allow Input Monitoring to use ${s.hotkeyName}` };
+  if (!s.hotkeyActive) {
+    // Windows asks no permission: the keyboard hook could not be installed.
+    const hint = isMac ? `Allow Input Monitoring to use ${s.hotkeyName}` : `Viary can’t see the keyboard. Quit and open Viary again`;
+    return { label: isMac ? "Almost ready" : "Talk key off", tone: "attention", hint };
+  }
   return { label: "Ready", tone: "ok", hint: hold };
 }
 
