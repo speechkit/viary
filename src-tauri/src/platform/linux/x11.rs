@@ -57,8 +57,9 @@ pub fn press(keysyms: &[u32]) -> Result<(), String> {
         .iter()
         .map(|&k| keycode(&conn, k))
         .collect::<Result<Vec<_>, _>>()?;
-    let send = |kind, code| {
+    let send = |kind: u8, code: Keycode| {
         conn.xtest_fake_input(kind, code, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .map(drop)
             .map_err(|e| e.to_string())
     };
     for &code in &codes {
