@@ -84,7 +84,9 @@ class Pill {
             visible: false,
             y_align: Clutter.ActorAlign.CENTER,
         });
-        Main.layoutManager.addTopChrome(this._actor, {affectsInputRegion: true});
+        // Above every window, taking clicks. GNOME 50 rejects the
+        // affectsInputRegion option that earlier versions defaulted to on.
+        Main.layoutManager.addTopChrome(this._actor);
         this._actor.connect('notify::width', () => this._place());
         this._levels = [];
         this._view = {kind: 'idle'};
