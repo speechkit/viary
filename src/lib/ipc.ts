@@ -613,9 +613,37 @@ export function knownApps(history: HistoryItem[] | null): string[] {
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([app]) => app);
 }
 
+/** An app name's words, lowercased, without punctuation. */
+function appWords(name: string): string[] {
+  return name.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+}
+
+/**
+ * Whether `entered`, an app as the user named it, names `app`, as the system
+ * reports it: its words, in order, among the app's ("Outlook" names
+ * "Microsoft Outlook"; "Mail" does not name "Mailspring"). The rank puts an
+ * exact name first, then more words. As settings.rs `app_match` decides it.
+ */
+export function appMatch(entered: string, app: string): [exact: number, words: number] | null {
+  const wanted = appWords(entered);
+  const words = appWords(app);
+  if (!wanted.length) return null;
+  for (let i = 0; i + wanted.length <= words.length; i++) {
+    if (wanted.every((w, j) => words[i + j] === w)) return [wanted.length === words.length ? 1 : 0, wanted.length];
+  }
+  return null;
+}
+
 /** The polish tone that applies in `app`, as the backend decides it. */
 export function toneIn(polish: PolishSettings, app: string): Tone {
-  const own = polish.tones.find((t) => t.app.toLowerCase() === app.toLowerCase())?.tone ?? polish.defaultTone;
+  let best: { rank: [number, number]; tone: Tone } | null = null;
+  for (const t of polish.tones) {
+    const rank = appMatch(t.app, app);
+    if (rank && (!best || rank[0] > best.rank[0] || (rank[0] === best.rank[0] && rank[1] > best.rank[1]))) {
+      best = { rank, tone: t.tone };
+    }
+  }
+  const own = best?.tone ?? polish.defaultTone;
   if (own === "literal") return "literal";
   return polish.appTone ? own : "asSpoken";
 }
