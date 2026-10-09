@@ -185,12 +185,6 @@ fn dark_tray() -> bool {
     return true;
 }
 
-/// The icon's color: macOS tints a template itself, so only an icon with a
-/// colored dot needs to know.
-fn tray_ink(template: bool) -> [u8; 3] {
-    if !template && dark_tray() { [0xFF; 3] } else { [0; 3] }
-}
-
 /// Whether the plain icon is a template image macOS colors for the menu
 /// bar. Elsewhere Viary colors it.
 const TEMPLATE: bool = cfg!(target_os = "macos");
@@ -211,13 +205,16 @@ fn resolve(dictation: TrayState, paused: bool, loading: bool, attention: bool) -
     }
 }
 
-/// How a state is drawn: its dot, and whether the mark is grayed and
+/// How a state is drawn: the mark's color, its dot, and whether it is
 /// struck through. On a dark bar (GNOME's, a dark taskbar or menu bar) the
 /// dots are lighter, as the design draws them.
 struct Look {
+    ink: [u8; 3],
     badge: Option<[u8; 3]>,
-    dim: bool,
     struck: bool,
+    /// A template image macOS colors for the menu bar itself; it loses the
+    /// dot's color and the gray, so only the plain mark is one.
+    template: bool,
 }
 
 fn look(state: TrayState, dark: bool) -> Look {
@@ -235,7 +232,15 @@ fn look(state: TrayState, dark: bool) -> Look {
         TrayState::Loading => (Some(gray), true, false),
         TrayState::Paused => (None, true, true),
     };
-    Look { badge, dim, struck }
+    let template = TEMPLATE && badge.is_none() && !dim;
+    let ink = if dim {
+        gray
+    } else if !template && dark {
+        [0xFF; 3]
+    } else {
+        [0; 3]
+    };
+    Look { ink, badge, struck, template }
 }
 
 /// "for 12 more minutes", "for 1 hour": what is left of a pause.
@@ -266,10 +271,7 @@ fn status_text(app: &AppHandle, state: TrayState, attention: Option<&str>) -> St
         },
         TrayState::Paused => match viary.pause.get().and_then(|p| p.until) {
             Some(until) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-                format!("paused {}", paused_for(until.saturating_sub(now)))
+                format!("paused {}", paused_for(until.saturating_sub(crate::pause::now_ms())))
             }
             None => "paused until you resume".into(),
         },
@@ -321,15 +323,7 @@ pub fn redraw_tray(app: &AppHandle) {
         }
         *shown = Some((state, text.clone()));
     }
-    let Look { badge, dim, struck } = look(state, dark_tray());
-    // A template image follows the menu bar's color but loses the dot's
-    // and the gray.
-    let template = TEMPLATE && badge.is_none() && !dim;
-    let ink = if dim {
-        if dark_tray() { [0x80; 3] } else { [0x8A; 3] }
-    } else {
-        tray_ink(template)
-    };
+    let Look { ink, badge, struck, template } = look(state, dark_tray());
     let size = 44;
     let _ = tray.set_icon(Some(Image::new_owned(
         icons::tray(size, ink, badge, struck),
@@ -341,7 +335,9 @@ pub fn redraw_tray(app: &AppHandle) {
 }
 
 pub fn tray_icon() -> Image<'static> {
-    Image::new_owned(icons::tray(44, tray_ink(TEMPLATE), None, false), 44, 44)
+    // A template's color is macOS's to choose: no need to ask the theme.
+    let ink = look(TrayState::Idle, !TEMPLATE && dark_tray()).ink;
+    Image::new_owned(icons::tray(44, ink, None, false), 44, 44)
 }
 
 pub fn build_main(app: &AppHandle, visible: bool) -> tauri::Result<WebviewWindow> {
@@ -655,8 +651,9 @@ mod tray_tests {
         assert_eq!(look(TrayState::Listening, false).badge, Some([0xE0, 0x45, 0x2B]));
         assert_eq!(look(TrayState::Attention, true).badge, Some([0xF5, 0xC2, 0x11]));
         let paused = look(TrayState::Paused, true);
-        assert!(paused.dim && paused.struck && paused.badge.is_none());
-        assert!(look(TrayState::Loading, false).dim);
+        assert!(paused.struck && paused.badge.is_none() && !paused.template);
+        assert_eq!(paused.ink, [0x80; 3]);
+        assert_eq!(look(TrayState::Loading, false).ink, [0x8A; 3]);
     }
 
     #[test]

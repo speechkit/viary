@@ -7,8 +7,10 @@
 
 use std::{
     path::PathBuf,
-    sync::Mutex,
-    time::{Duration, Instant},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU8, Ordering},
+    },
 };
 
 use ashpd::zbus::{self, MatchRule, MessageStream, message::Type};
@@ -19,7 +21,6 @@ use tauri::{AppHandle, Manager};
 use crate::{
     App,
     dictation::{Msg, PillAction, PillView},
-    lock,
 };
 
 const UUID: &str = "viary@viary.app";
@@ -49,20 +50,30 @@ fn dir() -> Option<PathBuf> {
     Some(data.join("gnome-shell/extensions").join(UUID))
 }
 
-/// Whether the extension answers, asked at most every few seconds: the
-/// pill and every paste ask.
-static ACTIVE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+/// Whether the extension answers: asked once, then kept current by
+/// [`watch_owner`] as the shell's name comes and goes. The pill's level and
+/// every snapshot ask, so asking must not wait on the bus.
+static ACTIVE: AtomicU8 = AtomicU8::new(UNKNOWN);
+const UNKNOWN: u8 = 0;
+const NO: u8 = 1;
+const YES: u8 = 2;
+
+/// Records whether the extension answers; true if that changed.
+fn set_active(active: bool) -> bool {
+    let state = if active { YES } else { NO };
+    ACTIVE.swap(state, Ordering::SeqCst) != state
+}
 
 pub fn active() -> bool {
-    let mut cached = lock(&ACTIVE);
-    if let Some((at, active)) = *cached
-        && at.elapsed() < Duration::from_secs(3)
-    {
-        return active;
+    match ACTIVE.load(Ordering::SeqCst) {
+        // Before the watch has answered, at startup: ask now.
+        UNKNOWN => {
+            let active = tauri::async_runtime::block_on(has_owner()).unwrap_or(false);
+            set_active(active);
+            active
+        }
+        state => state == YES,
     }
-    let active = tauri::async_runtime::block_on(has_owner()).unwrap_or(false);
-    *cached = Some((Instant::now(), active));
-    active
 }
 
 async fn has_owner() -> zbus::Result<bool> {
@@ -106,34 +117,17 @@ pub fn install() -> Result<(), String> {
         // on some versions; add it to the list GNOME reads at login.
         add_to_enabled()?;
     }
-    *lock(&ACTIVE) = None;
     Ok(())
 }
 
 fn add_to_enabled() -> Result<(), String> {
-    let out = std::process::Command::new("gsettings")
-        .args(["get", "org.gnome.shell", "enabled-extensions"])
-        .output()
-        .map_err(|e| e.to_string())?;
-    let current = String::from_utf8_lossy(&out.stdout);
-    if current.contains(UUID) {
+    let mut list = super::gsettings_list("org.gnome.shell", "enabled-extensions")?;
+    if list.iter().any(|uuid| uuid == UUID) {
         return Ok(());
     }
-    let mut list: Vec<String> = current
-        .trim()
-        .trim_start_matches("@as")
-        .trim()
-        .trim_matches(|c| c == '[' || c == ']')
-        .split(',')
-        .map(|p| p.trim().to_owned())
-        .filter(|p| !p.is_empty())
-        .collect();
-    list.push(format!("'{UUID}'"));
-    let set = std::process::Command::new("gsettings")
-        .args(["set", "org.gnome.shell", "enabled-extensions", &format!("[{}]", list.join(", "))])
-        .status()
-        .map_err(|e| e.to_string())?;
-    if set.success() { Ok(()) } else { Err("cannot enable the extension".into()) }
+    list.push(UUID.to_owned());
+    super::gsettings_set_list("org.gnome.shell", "enabled-extensions", &list)
+        .map_err(|e| format!("cannot enable the extension: {e}"))
 }
 
 async fn call<B>(method: &str, body: &B) -> zbus::Result<zbus::Message>
@@ -162,38 +156,106 @@ pub fn focused_app() -> Option<(i32, String)> {
     })
 }
 
+/// A change to the shell's pill.
+enum Update {
+    Pill(String),
+    Level(f64),
+    Partial(u64, String),
+}
+
+/// Sends `update` after the ones before it: calls made from tasks of their
+/// own could reach the shell out of order, leaving the pill on a state the
+/// dictation has left.
+fn send(update: Update) {
+    static UPDATES: OnceLock<tokio::sync::mpsc::UnboundedSender<Update>> = OnceLock::new();
+    let updates = UPDATES.get_or_init(|| {
+        let (sender, mut received) = tokio::sync::mpsc::unbounded_channel();
+        tauri::async_runtime::spawn(async move {
+            while let Some(update) = received.recv().await {
+                match update {
+                    Update::Pill(json) => {
+                        if let Err(error) = call("ShowPill", &(json,)).await {
+                            tracing::warn!(%error, "cannot show the pill in GNOME Shell");
+                        }
+                    }
+                    Update::Level(level) => {
+                        let _ = call("SetLevel", &(level,)).await;
+                    }
+                    Update::Partial(token, text) => {
+                        let _ = call("SetPartial", &(token, text)).await;
+                    }
+                }
+            }
+        });
+        sender
+    });
+    let _ = updates.send(update);
+}
+
 /// Shows `view` in the shell's pill.
 pub fn show_pill(view: &PillView) {
-    let Ok(json) = serde_json::to_string(view) else {
-        return;
-    };
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = call("ShowPill", &(json,)).await {
-            tracing::warn!(%error, "cannot show the pill in GNOME Shell");
-        }
-    });
+    if let Ok(json) = serde_json::to_string(view) {
+        send(Update::Pill(json));
+    }
 }
 
 pub fn level(level: f32) {
-    tauri::async_runtime::spawn(async move {
-        let _ = call("SetLevel", &(f64::from(level),)).await;
-    });
+    send(Update::Level(f64::from(level)));
 }
 
 pub fn partial(token: u64, text: String) {
-    tauri::async_runtime::spawn(async move {
-        let _ = call("SetPartial", &(token, text)).await;
-    });
+    send(Update::Partial(token, text));
 }
 
 /// Acts on the pill's buttons, for as long as Viary runs.
+/// Also follows whether the extension is running.
 pub fn listen(app: &AppHandle) {
     let app = app.clone();
+    let watching = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(error) = actions(&app).await {
             tracing::warn!(%error, "cannot listen to the GNOME Shell pill");
         }
     });
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = watch_owner(&watching).await {
+            tracing::warn!(%error, "cannot follow the GNOME Shell extension");
+        }
+    });
+}
+
+/// Keeps [`ACTIVE`] current: the extension's name gains an owner when the
+/// shell turns it on, and loses it when the shell turns it off or restarts.
+async fn watch_owner(app: &AppHandle) -> zbus::Result<()> {
+    const DBUS: &str = "org.freedesktop.DBus";
+    let connection = super::session_bus().await?;
+    // Subscribed before asking, so no change falls in between.
+    let rule = MatchRule::builder()
+        .msg_type(Type::Signal)
+        .sender(DBUS)?
+        .interface(DBUS)?
+        .member("NameOwnerChanged")?
+        .add_arg(BUS)?
+        .build();
+    let mut stream = MessageStream::for_match_rule(rule, &connection, None).await?;
+    if set_active(has_owner().await?) {
+        crate::ui::refresh(app);
+    }
+    while let Some(message) = stream.next().await {
+        let Ok(message) = message else { continue };
+        // Only the bus itself may say who owns a name; no client can own
+        // `org.freedesktop.DBus`.
+        if message.header().sender().is_none_or(|sender| sender.as_str() != DBUS) {
+            continue;
+        }
+        let Ok((name, _old, new)) = message.body().deserialize::<(String, String, String)>() else {
+            continue;
+        };
+        if name == BUS && set_active(!new.is_empty()) {
+            crate::ui::refresh(app);
+        }
+    }
+    Ok(())
 }
 
 async fn actions(app: &AppHandle) -> zbus::Result<()> {

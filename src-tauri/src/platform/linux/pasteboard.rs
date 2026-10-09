@@ -4,10 +4,11 @@
 
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
+    path::PathBuf,
     sync::Mutex,
 };
 
-use arboard::{Clipboard, SetExtLinux};
+use arboard::{Clipboard, ImageData, SetExtLinux};
 
 use crate::lock;
 
@@ -28,8 +29,19 @@ fn with<T>(use_it: impl FnOnce(&mut Clipboard) -> T) -> Option<T> {
     held.as_mut().map(use_it)
 }
 
-/// The text the user had copied, if any.
-pub struct Saved(Option<String>);
+/// What the user had copied, in the richest form Viary can put back.
+enum Content {
+    /// Files copied in Files (Nautilus).
+    Files(Vec<PathBuf>),
+    /// An image, such as a screenshot.
+    Image(ImageData<'static>),
+    /// Formatted text, with its plain-text form.
+    Html { html: String, text: Option<String> },
+    Text(String),
+}
+
+/// What the user had copied, if anything Viary can read.
+pub struct Saved(Option<Content>);
 
 fn mark(text: &str) -> isize {
     let mut hasher = DefaultHasher::new();
@@ -37,8 +49,28 @@ fn mark(text: &str) -> isize {
     hasher.finish() as isize
 }
 
+/// Files and images first: an app copying an image also offers HTML
+/// pointing at it, and Files offers the paths as text.
+fn read(c: &mut Clipboard) -> Option<Content> {
+    if let Ok(files) = c.get().file_list()
+        && !files.is_empty()
+    {
+        return Some(Content::Files(files));
+    }
+    if let Ok(image) = c.get().image() {
+        return Some(Content::Image(image));
+    }
+    if let Ok(html) = c.get().html() {
+        return Some(Content::Html {
+            html,
+            text: c.get_text().ok(),
+        });
+    }
+    c.get_text().ok().map(Content::Text)
+}
+
 pub fn save() -> Saved {
-    Saved(with(|c| c.get_text().ok()).flatten())
+    Saved(with(read).flatten())
 }
 
 fn write(text: &str, transient: bool) -> isize {
@@ -67,7 +99,20 @@ pub fn restore(saved: Saved, ours: isize) {
     if current.as_deref().map(mark) != Some(ours) {
         return;
     }
-    if let Some(text) = saved.0 {
-        write(&text, true);
-    }
+    let Some(content) = saved.0 else {
+        return;
+    };
+    with(|c| {
+        // The user's copy is already in any clipboard history.
+        let set = c.set().exclude_from_history();
+        let restored = match content {
+            Content::Files(files) => set.file_list(files.as_slice()),
+            Content::Image(image) => set.image(image),
+            Content::Html { html, text } => set.html(html.as_str(), text.as_deref()),
+            Content::Text(text) => set.text(text),
+        };
+        if let Err(error) = restored {
+            tracing::warn!(%error, "cannot put the clipboard back");
+        }
+    });
 }
