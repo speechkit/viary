@@ -472,17 +472,24 @@ export function EnginePage({ s }: { s: Snapshot }) {
         <div className="flex items-center gap-3.5 px-[18px] py-3">
           <div className="flex min-w-0 grow flex-col gap-0.5">
             <span className="text-sm font-medium">Run models on</span>
-            <span className="text-[13px] leading-[1.45] text-muted">CoreML may use the GPU or the Neural Engine.</span>
+            <span className="text-[13px] leading-[1.45] text-muted">
+              {isMac ? "CoreML may use the GPU or the Neural Engine." : "The processor: Viary’s speech models run on the CPU here."}
+            </span>
           </div>
-          <Seg
-            label="Execution provider"
-            value={settings.provider}
-            options={[
-              ["cpu", "CPU"],
-              ["coreml", "CoreML"],
-            ]}
-            onChange={(provider) => api.setPreferences({ provider }).catch((e) => setError(errorText(e)))}
-          />
+          {/* CoreML is Apple's; elsewhere the CPU is the only choice. */}
+          {isMac ? (
+            <Seg
+              label="Execution provider"
+              value={settings.provider}
+              options={[
+                ["cpu", "CPU"],
+                ["coreml", "CoreML"],
+              ]}
+              onChange={(provider) => api.setPreferences({ provider }).catch((e) => setError(errorText(e)))}
+            />
+          ) : (
+            <span className="text-[13px] font-medium text-muted">CPU</span>
+          )}
         </div>
       </div>
 
