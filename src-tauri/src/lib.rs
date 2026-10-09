@@ -428,6 +428,11 @@ fn set_preferences(app: AppHandle, state: State<'_, App>, prefs: Preferences) ->
             return Err(format!("{provider} is not available on this computer"));
         }
     }
+    if let Some(hotkey) = prefs.hotkey
+        && !Hotkey::AVAILABLE.contains(&hotkey)
+    {
+        return Err(format!("{} is not a talk key on this computer", dictation::key_name(hotkey)));
+    }
     let inference_changed = prefs.provider.is_some() || prefs.threads.is_some();
     let settings = state.change(|s| {
         if let Some(microphone) = prefs.microphone {
@@ -1316,6 +1321,27 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// Viary was started again while running: `viary --toggle` from GNOME's
+/// custom shortcut acts as the talk shortcut; anything else shows Viary.
+#[cfg(not(target_os = "macos"))]
+fn another_launch(app: &AppHandle, args: &[String]) {
+    #[cfg(target_os = "linux")]
+    if args.iter().any(|a| a == "--toggle") {
+        platform::hotkey::toggle();
+        return;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = args;
+    match app.get_webview_window("setup") {
+        Some(setup) => {
+            let _ = setup.show();
+            let _ = setup.unminimize();
+            let _ = setup.set_focus();
+        }
+        None => ui::open_main(app, "home"),
+    }
+}
+
 /// `viary --toggle`: see `platform::hotkey`.
 #[cfg(target_os = "linux")]
 pub fn send_toggle() -> bool {
@@ -1329,7 +1355,16 @@ pub fn run() {
                 .unwrap_or_else(|_| "info,viary_lib=debug".into()),
         )
         .init();
-    let built = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Windows and Linux start a second Viary as readily as the first (at
+    // sign-in, then from the Start menu): it would add a second keyboard
+    // hook and tray icon. The second hands its arguments over and quits.
+    // Registered first, as the plugin asks.
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        another_launch(app, &args);
+    }));
+    let built = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,

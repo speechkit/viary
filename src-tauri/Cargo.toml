@@ -37,6 +37,11 @@ objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSData
 objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "NSPasteboard", "NSPasteboardItem", "NSWindow", "NSResponder", "NSApplication", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSView", "NSDragging"] }
 security-framework = "3"
 
+# A second launch hands its arguments to the running Viary and quits.
+# macOS needs none: an app bundle opens once.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+tauri-plugin-single-instance = "2"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Foundation",

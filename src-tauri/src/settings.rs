@@ -24,6 +24,23 @@ pub enum Hotkey {
     Shortcut,
 }
 
+impl Hotkey {
+    /// The keys this system's listener can hear.
+    pub const AVAILABLE: &'static [Self] = if cfg!(target_os = "macos") {
+        &[Self::Fn, Self::RightOption, Self::RightCommand]
+    } else if cfg!(target_os = "windows") {
+        &[Self::RightAlt, Self::CtrlWin]
+    } else {
+        &[Self::Shortcut]
+    };
+
+    /// This key, or the system's default where the listener cannot hear
+    /// it: settings copied from another system.
+    pub fn here(self) -> Self {
+        if Self::AVAILABLE.contains(&self) { self } else { Self::default() }
+    }
+}
+
 impl Default for Hotkey {
     fn default() -> Self {
         if cfg!(target_os = "macos") {
@@ -280,8 +297,11 @@ impl Default for PolishSettings {
 impl PolishSettings {
     /// The tone set for the app named `app`.
     pub fn tone_in(&self, app: &str) -> Tone {
+        // Reversed, so of equally ranked tones the first listed wins:
+        // `max_by_key` keeps the last of equals. The web views pick alike.
         self.tones
             .iter()
+            .rev()
             .filter_map(|t| Some((app_match(&t.app, app)?, t.tone)))
             .max_by_key(|(rank, _)| *rank)
             .map_or(self.default_tone, |(_, tone)| tone)
@@ -491,6 +511,12 @@ impl SettingsStore {
     /// unreadable. An unreadable file is set aside first, so the next save
     /// does not overwrite the user's only copy.
     pub fn load(&self) -> Settings {
+        let mut settings = self.read();
+        settings.hotkey = settings.hotkey.here();
+        settings
+    }
+
+    fn read(&self) -> Settings {
         match fs::read_to_string(&self.path) {
             Ok(text) => serde_json::from_str(&text).unwrap_or_else(|error| {
                 let backup = self.path.with_extension("json.bak");
@@ -630,5 +656,23 @@ mod tests {
         assert_eq!(polish.tone_in("Visual Studio Code"), Tone::Casual);
         assert_eq!(polish.tone_in("Code - Insiders"), Tone::Literal);
         assert_eq!(polish.tone_in("Microsoft Outlook"), polish.default_tone);
+    }
+
+    #[test]
+    fn of_equally_specific_tones_the_first_wins() {
+        let mut polish = PolishSettings::default();
+        polish.set_tone("Microsoft", Some(Tone::Literal));
+        polish.set_tone("Outlook", Some(Tone::Casual));
+        assert_eq!(polish.tone_in("Microsoft Outlook"), Tone::Literal);
+    }
+
+    #[test]
+    fn a_key_from_another_system_becomes_this_ones() {
+        for &key in Hotkey::AVAILABLE {
+            assert_eq!(key.here(), key);
+        }
+        let elsewhere = if cfg!(target_os = "macos") { Hotkey::RightAlt } else { Hotkey::Fn };
+        assert_eq!(elsewhere.here(), Hotkey::default());
+        assert!(Hotkey::AVAILABLE.contains(&Hotkey::default()));
     }
 }

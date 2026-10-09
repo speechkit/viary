@@ -126,18 +126,22 @@ pub fn press(keysyms: &[u32]) -> Result<(), String> {
     conn.flush().map_err(|e| e.to_string())
 }
 
-/// The active window, its process, and its class ("firefox").
-pub fn active_window() -> Option<(Window, i32, String)> {
-    let (conn, root) = connect().ok()?;
-    let active = atom(&conn, "_NET_ACTIVE_WINDOW").ok()?;
-    let window = conn
-        .get_property(false, root, active, AtomEnum::WINDOW, 0, 1)
+/// The active window on `conn`, if any.
+fn active_on(conn: &RustConnection, root: Window, active: u32) -> Option<Window> {
+    conn.get_property(false, root, active, AtomEnum::WINDOW, 0, 1)
         .ok()?
         .reply()
         .ok()?
         .value32()?
         .next()
-        .filter(|&w| w != 0)?;
+        .filter(|&w| w != 0)
+}
+
+/// The active window, its process, and its class ("firefox").
+pub fn active_window() -> Option<(Window, i32, String)> {
+    let (conn, root) = connect().ok()?;
+    let active = atom(&conn, "_NET_ACTIVE_WINDOW").ok()?;
+    let window = active_on(&conn, root, active)?;
     let pid_atom = atom(&conn, "_NET_WM_PID").ok()?;
     let pid = conn
         .get_property(false, window, pid_atom, AtomEnum::CARDINAL, 0, 1)
@@ -159,23 +163,42 @@ pub fn active_window() -> Option<(Window, i32, String)> {
     Some((window, pid, class))
 }
 
-/// Asks the window manager to raise and focus `window`.
-pub fn activate(window: Window) -> bool {
+/// Asks the window manager to raise and focus `window`, and waits up to
+/// `timeout` for it to: the window manager moves the focus in its own
+/// time. Returns whether `window` is active.
+pub fn activate(window: Window, timeout: Duration) -> bool {
     let Ok((conn, root)) = connect() else {
         return false;
     };
     let Ok(active) = atom(&conn, "_NET_ACTIVE_WINDOW") else {
         return false;
     };
+    if active_on(&conn, root, active) == Some(window) {
+        return true;
+    }
     // Source 2: a pager, which window managers obey without focus-stealing
     // checks.
     let event = ClientMessageEvent::new(32, window, active, [2, x11rb::CURRENT_TIME, 0, 0, 0]);
-    conn.send_event(
-        false,
-        root,
-        EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
-        event,
-    )
-    .is_ok()
-        && conn.flush().is_ok()
+    let sent = conn
+        .send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        )
+        .is_ok()
+        && conn.flush().is_ok();
+    if !sent {
+        return false;
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        if active_on(&conn, root, active) == Some(window) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
 }

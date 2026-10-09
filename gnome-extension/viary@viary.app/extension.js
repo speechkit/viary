@@ -288,13 +288,33 @@ export default class ViaryExtension extends Extension {
         return VERSION;
     }
 
-    /** Whether `invocation` comes from Viary; answers AccessDenied if not. */
-    _fromViary(invocation) {
-        if (this._viary && invocation.get_sender() === this._viary)
-            return true;
-        invocation.return_dbus_error('org.freedesktop.DBus.Error.AccessDenied',
-            `Only the client that owns ${VIARY_NAME} may call this`);
-        return false;
+    /** Runs `then` if `invocation` comes from Viary; answers AccessDenied
+     *  if not. A sender other than the one the name watch last saw is
+     *  asked about first: Viary claims its name just before its first call,
+     *  which can come before the watch hears of it. */
+    _fromViary(invocation, then) {
+        const sender = invocation.get_sender();
+        if (this._viary && sender === this._viary) {
+            then();
+            return;
+        }
+        Gio.DBus.session.call('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus',
+            'GetNameOwner', new GLib.Variant('(s)', [VIARY_NAME]), new GLib.VariantType('(s)'),
+            Gio.DBusCallFlags.NONE, -1, null, (connection, result) => {
+                let owner = null;
+                try {
+                    [owner] = connection.call_finish(result).deepUnpack();
+                } catch {
+                    // No owner: Viary is not running.
+                }
+                if (owner && owner === sender && this._pill) {
+                    this._viary = owner;
+                    then();
+                } else {
+                    invocation.return_dbus_error('org.freedesktop.DBus.Error.AccessDenied',
+                        `Only the client that owns ${VIARY_NAME} may call this`);
+                }
+            });
     }
 
     /** Presses `keyvals` in order, then releases them in reverse. */
@@ -334,48 +354,48 @@ export default class ViaryExtension extends Extension {
     // its sender.
 
     PasteAsync(_params, invocation) {
-        if (this._fromViary(invocation))
-            this._pressWhenReleased([Clutter.KEY_Control_L, Clutter.KEY_v], invocation);
+        this._fromViary(invocation, () =>
+            this._pressWhenReleased([Clutter.KEY_Control_L, Clutter.KEY_v], invocation));
     }
 
     UndoAsync(_params, invocation) {
-        if (this._fromViary(invocation))
-            this._pressWhenReleased([Clutter.KEY_Control_L, Clutter.KEY_z], invocation);
+        this._fromViary(invocation, () =>
+            this._pressWhenReleased([Clutter.KEY_Control_L, Clutter.KEY_z], invocation));
     }
 
     FocusedAppAsync(_params, invocation) {
-        if (!this._fromViary(invocation))
-            return;
-        const window = global.display.focus_window;
-        const app = window ? Shell.WindowTracker.get_default().get_window_app(window) : null;
-        const focused = window
-            ? [window.get_pid(), app?.get_name() ?? window.get_wm_class() ?? '']
-            : [0, ''];
-        invocation.return_value(new GLib.Variant('(is)', focused));
+        this._fromViary(invocation, () => {
+            const window = global.display.focus_window;
+            const app = window ? Shell.WindowTracker.get_default().get_window_app(window) : null;
+            const focused = window
+                ? [window.get_pid(), app?.get_name() ?? window.get_wm_class() ?? '']
+                : [0, ''];
+            invocation.return_value(new GLib.Variant('(is)', focused));
+        });
     }
 
     ShowPillAsync([view], invocation) {
-        if (!this._fromViary(invocation))
-            return;
-        try {
-            this._pill.show(JSON.parse(view));
-        } catch (error) {
-            logError(error, 'Viary: cannot show the pill');
-        }
-        invocation.return_value(null);
+        this._fromViary(invocation, () => {
+            try {
+                this._pill?.show(JSON.parse(view));
+            } catch (error) {
+                logError(error, 'Viary: cannot show the pill');
+            }
+            invocation.return_value(null);
+        });
     }
 
     SetLevelAsync([level], invocation) {
-        if (!this._fromViary(invocation))
-            return;
-        this._pill.level(level);
-        invocation.return_value(null);
+        this._fromViary(invocation, () => {
+            this._pill?.level(level);
+            invocation.return_value(null);
+        });
     }
 
     SetPartialAsync([token, text], invocation) {
-        if (!this._fromViary(invocation))
-            return;
-        this._pill.partial(Number(token), text);
-        invocation.return_value(null);
+        this._fromViary(invocation, () => {
+            this._pill?.partial(Number(token), text);
+            invocation.return_value(null);
+        });
     }
 }

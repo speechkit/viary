@@ -12,7 +12,10 @@
 
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
 };
 
 use ashpd::zbus::{self, MatchRule, MessageStream, message::Type, zvariant::Value};
@@ -114,15 +117,28 @@ pub fn pill(view: &PillView) {
     if note.is_none() && !was_actionable {
         return;
     }
-    tauri::async_runtime::spawn(async move {
-        let result = match note {
-            Some(note) => show(&note).await,
-            None => close_shown().await,
-        };
-        if let Err(error) = result {
-            tracing::warn!(%error, "cannot update the notification");
-        }
-    });
+    let _ = updates().send(note);
+}
+
+/// Notification updates, in order: each replaces the one `show` last
+/// stored in [`SHOWN`], so they must not overlap. `None` closes it.
+fn updates() -> &'static tokio::sync::mpsc::UnboundedSender<Option<Note>> {
+    static UPDATES: OnceLock<tokio::sync::mpsc::UnboundedSender<Option<Note>>> = OnceLock::new();
+    UPDATES.get_or_init(|| {
+        let (sender, mut received) = tokio::sync::mpsc::unbounded_channel::<Option<Note>>();
+        tauri::async_runtime::spawn(async move {
+            while let Some(note) = received.recv().await {
+                let result = match note {
+                    Some(note) => show(&note).await,
+                    None => close_shown().await,
+                };
+                if let Err(error) = result {
+                    tracing::warn!(%error, "cannot update the notification");
+                }
+            }
+        });
+        sender
+    })
 }
 
 async fn show(note: &Note) -> zbus::Result<()> {

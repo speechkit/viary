@@ -333,28 +333,31 @@ function TonesCard({ s, onError }: { s: Snapshot; onError: (e: string) => void }
         />
       )}
       <div className={dim}>
-        {polish.tones.map(({ app, tone }) => (
-          <div key={app} className="group flex items-center gap-3 border-b border-hair px-5 py-2.5">
-            <AppTile app={app} />
-            <span className="flex min-w-0 grow flex-col">
-              <span className="truncate text-sm">{app}</span>
-              {alsoIn(app, listed, seen).length > 0 && (
-                <span className="truncate text-xs text-faint" title={alsoIn(app, listed, seen).join(", ")}>
-                  Also in {alsoIn(app, listed, seen).join(", ")}
-                </span>
-              )}
-            </span>
-            <Select label={`${app} tone`} value={tone} options={TONES} onChange={(t) => setTone(app, t)} />
-            <button
-              type="button"
-              aria-label={`Remove ${app}`}
-              className="text-faint opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover:text-rust"
-              onClick={() => setTone(app, null)}
-            >
-              <Icon name="close" size={14} />
-            </button>
-          </div>
-        ))}
+        {polish.tones.map(({ app, tone }) => {
+          const also = alsoIn(app, listed, seen).join(", ");
+          return (
+            <div key={app} className="group flex items-center gap-3 border-b border-hair px-5 py-2.5">
+              <AppTile app={app} />
+              <span className="flex min-w-0 grow flex-col">
+                <span className="truncate text-sm">{app}</span>
+                {also && (
+                  <span className="truncate text-xs text-faint" title={also}>
+                    Also in {also}
+                  </span>
+                )}
+              </span>
+              <Select label={`${app} tone`} value={tone} options={TONES} onChange={(t) => setTone(app, t)} />
+              <button
+                type="button"
+                aria-label={`Remove ${app}`}
+                className="text-faint opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover:text-rust"
+                onClick={() => setTone(app, null)}
+              >
+                <Icon name="close" size={14} />
+              </button>
+            </div>
+          );
+        })}
         <div className="flex items-center gap-3 px-5 py-2.5">
           <span aria-hidden="true" className="flex size-7 shrink-0 items-center justify-center rounded-[7px] border border-dashed border-stone text-faint">
             <Icon name="plus" size={12} />
