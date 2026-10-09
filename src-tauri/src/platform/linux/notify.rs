@@ -182,12 +182,16 @@ async fn actions(app: &AppHandle) -> zbus::Result<()> {
     let connection = super::session_bus().await?;
     let rule = MatchRule::builder()
         .msg_type(Type::Signal)
+        .path(PATH)?
         .interface(BUS)?
         .member("ActionInvoked")?
         .build();
     let mut stream = MessageStream::for_match_rule(rule, &connection, None).await?;
     while let Some(message) = stream.next().await {
         let Ok(message) = message else { continue };
+        if !super::sent_by(&message, BUS).await {
+            continue;
+        }
         let Ok((id, action)) = message.body().deserialize::<(u32, String)>() else {
             continue;
         };

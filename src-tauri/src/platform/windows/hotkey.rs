@@ -5,11 +5,16 @@
 //! catch: releasing Alt or Win alone opens the app's menu bar or the Start
 //! menu. So while the hotkey is held, Viary types an unassigned key once,
 //! which Windows counts as "used with another key", as AutoHotkey does.
+//!
+//! The hook procedure only records the key and hands any event to a thread
+//! of its own: Windows removes a low-level hook, without telling anyone,
+//! when it is slow to answer.
 
 use std::{
     sync::{
-        Arc, OnceLock,
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError,
         atomic::{AtomicBool, AtomicU8, Ordering},
+        mpsc,
     },
     time::Duration,
 };
@@ -18,14 +23,15 @@ use windows::Win32::{
     Foundation::{LPARAM, LRESULT, WPARAM},
     UI::{
         Input::KeyboardAndMouse::{
-            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
-            SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
+            GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
+            KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
             VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
         },
         WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT,
-            LLKHF_INJECTED, MSG, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-            WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
+            LLKHF_INJECTED, MSG, SetTimer, SetWindowsHookExW, TranslateMessage,
+            UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            WM_TIMER,
         },
     },
 };
@@ -45,6 +51,10 @@ pub enum HotkeyEvent {
 /// An unassigned virtual key: typed to keep a lone Alt or Win release
 /// from opening a menu.
 const MASK_KEY: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
+
+/// How often the hook is installed afresh, while no key is held, in case
+/// Windows removed it (LowLevelHooksTimeout), in milliseconds.
+const REINSTALL_EVERY: u32 = 60_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Key {
@@ -97,12 +107,52 @@ impl Held {
         }
         true
     }
+
+    /// Forgets the modifiers Windows no longer reports down, other than
+    /// `current`, the key being reported. The hook misses key-ups that go
+    /// to the lock screen (Win+L), the secure desktop (Ctrl+Alt+Del), or an
+    /// app running as administrator; without this, a Win left "held" would
+    /// make a lone Ctrl start a dictation.
+    fn forget_released(&mut self, current: VIRTUAL_KEY, is_down: impl Fn(VIRTUAL_KEY) -> bool) {
+        let [left_ctrl, right_ctrl] = &mut self.ctrl;
+        let [left_win, right_win] = &mut self.win;
+        for (vk, held) in [
+            (VK_RMENU, &mut self.right_alt),
+            (VK_LCONTROL, left_ctrl),
+            (VK_RCONTROL, right_ctrl),
+            (VK_LWIN, left_win),
+            (VK_RWIN, right_win),
+        ] {
+            if vk != current && *held && !is_down(vk) {
+                *held = false;
+            }
+        }
+    }
+
+    /// Whether any key the hotkeys use is down.
+    fn any(&self) -> bool {
+        self.hotkey || self.right_alt || self.ctrl.contains(&true) || self.win.contains(&true)
+    }
+}
+
+/// Whether Windows reports `vk` down. Inside the hook this is the state
+/// before the key being reported.
+fn is_down(vk: VIRTUAL_KEY) -> bool {
+    // SAFETY: a plain query.
+    unsafe { GetAsyncKeyState(i32::from(vk.0)) < 0 }
 }
 
 struct Hook {
     hotkey: Arc<AtomicU8>,
-    on_event: Box<dyn Fn(HotkeyEvent) + Send + Sync>,
-    held: std::sync::Mutex<Held>,
+    /// To the thread that acts on events, off the hook procedure.
+    events: mpsc::Sender<HotkeyEvent>,
+    held: Mutex<Held>,
+}
+
+impl Hook {
+    fn held(&self) -> MutexGuard<'_, Held> {
+        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// The hook procedure is a plain function, so the listener it reports to
@@ -130,26 +180,23 @@ unsafe extern "system" fn procedure(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
 fn observe(hook: &Hook, vk: VIRTUAL_KEY, down: bool) {
     let key = decode(hook.hotkey.load(Ordering::Relaxed));
-    let mut held = hook.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !held.track(vk, down) {
-        // Key repeat sends more downs; any non-modifier key down counts.
-        if down && held.hotkey {
-            drop(held);
-            (hook.on_event)(HotkeyEvent::OtherKey);
-        }
-        return;
-    }
+    let mut held = hook.held();
+    held.forget_released(vk, is_down);
+    let modifier = held.track(vk, down);
     let now = held.of(key);
-    if now == held.hotkey {
-        return;
-    }
-    held.hotkey = now;
+    let event = if now != held.hotkey {
+        held.hotkey = now;
+        Some(if now { HotkeyEvent::Down } else { HotkeyEvent::Up })
+    } else if !modifier && down && now {
+        // Key repeat sends more downs; any non-modifier key down counts.
+        Some(HotkeyEvent::OtherKey)
+    } else {
+        None
+    };
     drop(held);
-    if now {
-        // Typed after the hook returns, so the order of keys is kept.
-        std::thread::spawn(|| tap(MASK_KEY));
+    if let Some(event) = event {
+        let _ = hook.events.send(event);
     }
-    (hook.on_event)(if now { HotkeyEvent::Down } else { HotkeyEvent::Up });
 }
 
 fn key_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
@@ -186,13 +233,28 @@ impl HotkeyListener {
             hotkey: Arc::new(AtomicU8::new(encode(hotkey))),
             active: Arc::new(AtomicBool::new(false)),
         };
+        let (events, received) = mpsc::channel();
         let installed = HOOK.set(Hook {
             hotkey: listener.hotkey.clone(),
-            on_event: Box::new(on_event),
-            held: std::sync::Mutex::default(),
+            events,
+            held: Mutex::default(),
         });
         if installed.is_err() {
             tracing::error!("the hotkey listener is already running");
+            return listener;
+        }
+        let acting = std::thread::Builder::new()
+            .name("viary-hotkey-events".into())
+            .spawn(move || {
+                for event in received {
+                    if event == HotkeyEvent::Down {
+                        tap(MASK_KEY);
+                    }
+                    on_event(event);
+                }
+            });
+        if let Err(error) = acting {
+            tracing::error!(%error, "cannot start the hotkey listener");
             return listener;
         }
         let active = listener.active.clone();
@@ -215,29 +277,55 @@ impl HotkeyListener {
     }
 }
 
+fn install() -> Option<HHOOK> {
+    // SAFETY: a low-level hook needs no module handle; it is removed when
+    // replaced or when the message loop ends.
+    match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(procedure), None, 0) } {
+        Ok(hook) => Some(hook),
+        Err(error) => {
+            tracing::warn!(%error, "cannot install the keyboard hook");
+            None
+        }
+    }
+}
+
+/// Whether a key the hotkeys use is down, so the hook must stay as it is.
+fn keys_held() -> bool {
+    HOOK.get().is_some_and(|hook| hook.held().any())
+}
+
 fn run(active: &AtomicBool) {
-    loop {
-        // SAFETY: a low-level hook needs no module handle; it is removed
-        // below when the message loop ends.
-        match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(procedure), None, 0) } {
-            Ok(hook) => {
-                active.store(true, Ordering::SeqCst);
-                tracing::info!("hotkey listener installed");
-                let mut message = MSG::default();
-                // SAFETY: the standard message loop for this thread.
-                unsafe {
-                    while GetMessageW(&raw mut message, None, 0, 0).as_bool() {
-                        let _ = TranslateMessage(&raw const message);
-                        DispatchMessageW(&raw const message);
-                    }
-                    let _ = UnhookWindowsHookEx(hook);
-                }
-                active.store(false, Ordering::SeqCst);
-            }
-            Err(error) => tracing::warn!(%error, "cannot install the keyboard hook"),
+    let mut hook = loop {
+        if let Some(hook) = install() {
+            break hook;
         }
         std::thread::sleep(Duration::from_secs(2));
+    };
+    active.store(true, Ordering::SeqCst);
+    tracing::info!("hotkey listener installed");
+    // SAFETY: the standard message loop for this thread, with a thread
+    // timer (no window) that posts WM_TIMER to it.
+    unsafe {
+        let _ = SetTimer(None, 0, REINSTALL_EVERY, None);
+        let mut message = MSG::default();
+        while GetMessageW(&raw mut message, None, 0, 0).as_bool() {
+            if message.message == WM_TIMER {
+                // Windows gives no sign that it removed the hook: install
+                // it again, then remove the old one if it is still there.
+                if !keys_held()
+                    && let Some(fresh) = install()
+                {
+                    let _ = UnhookWindowsHookEx(hook);
+                    hook = fresh;
+                }
+                continue;
+            }
+            let _ = TranslateMessage(&raw const message);
+            DispatchMessageW(&raw const message);
+        }
+        let _ = UnhookWindowsHookEx(hook);
     }
+    active.store(false, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -261,5 +349,29 @@ mod tests {
         assert!(!held.track(VIRTUAL_KEY(u16::from(b'A')), true));
         assert!(held.track(VK_RMENU, true));
         assert!(held.of(Key::RightAlt));
+    }
+
+    #[test]
+    fn a_missed_key_up_is_forgotten() {
+        let mut held = Held::default();
+        held.track(VK_LWIN, true);
+        // Win+L: the key-up went to the lock screen. Then Ctrl alone.
+        held.forget_released(VK_LCONTROL, |_| false);
+        held.track(VK_LCONTROL, true);
+        assert!(!held.of(Key::CtrlWin));
+        assert!(held.any());
+    }
+
+    #[test]
+    fn keys_still_down_are_kept() {
+        let mut held = Held::default();
+        held.track(VK_LWIN, true);
+        held.forget_released(VK_LCONTROL, |vk| vk == VK_LWIN);
+        held.track(VK_LCONTROL, true);
+        assert!(held.of(Key::CtrlWin));
+        // The key being reported is not asked about: Windows has not
+        // recorded it yet.
+        held.forget_released(VK_LWIN, |_| false);
+        assert!(held.win[0]);
     }
 }

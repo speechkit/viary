@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs a headless GNOME Shell (Wayland, as GNOME 50 always is) with
 # Viary's extension, then checks what Viary relies on: the extension
-# answers on D-Bus, and the portals for the talk shortcut and for typing
+# answers Viary on D-Bus and no one else, and the portals for the talk shortcut and for typing
 # are there. Ends with the
 # Linux tests that need a running GNOME (`cargo test -- --ignored gnome_`).
 #
@@ -58,12 +58,15 @@ viary() {
 
 echo "--- the extension"
 viary --method org.freedesktop.DBus.Properties.Get app.viary.Shell Version
-viary --method app.viary.Shell.FocusedApp
-viary --method app.viary.Shell.ShowPill \
-  '{"kind":"listening","token":1,"startedAt":0,"context":"CI","live":true}'
-viary --method app.viary.Shell.SetLevel 0.1
-viary --method app.viary.Shell.ShowPill '{"kind":"idle"}'
-viary --method app.viary.Shell.Paste
+# Only Viary's own connection (owning app.viary.App) is answered; the
+# Rust test below calls as Viary does. Anyone else is refused.
+for method in Paste Undo FocusedApp; do
+  if viary --method "app.viary.Shell.$method" 2>"$log.denied"; then
+    echo "::error::the extension answered $method from a client that is not Viary"
+    exit 1
+  fi
+  grep -q AccessDenied "$log.denied"
+done
 
 echo "--- the portals"
 portal() {

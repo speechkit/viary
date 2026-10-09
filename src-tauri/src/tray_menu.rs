@@ -6,7 +6,10 @@
 //! checks follow settings changed anywhere.
 
 use std::{
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -23,10 +26,16 @@ use crate::{
     ui,
 };
 
-/// The microphones as last listed, by position in the Microphone menu, and
-/// when: listing them takes a moment, so a recent list is reused.
+/// The microphones as last listed, and when. Listing them takes a moment,
+/// so it happens off the thread building the menu, and a recent list is
+/// reused.
 static MICROPHONES: Mutex<(Vec<String>, Option<Instant>)> = Mutex::new((Vec::new(), None));
+/// Whether a listing is under way.
+static LISTING: AtomicBool = AtomicBool::new(false);
 const LIST_EVERY: Duration = Duration::from_secs(5);
+/// The Default microphone's item. Devices are `mic:` and their name, which
+/// can be "default" itself (ALSA's).
+const DEFAULT_MIC: &str = "mic-default";
 
 const LANGUAGES: [(Language, &str, &str); 3] = [
     (Language::Auto, "lang:auto", "Auto"),
@@ -83,10 +92,10 @@ pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     menu.append(&language)?;
 
     let microphone = Submenu::with_id(app, "microphone", "Microphone", true)?;
-    microphone.append(&CheckMenuItem::with_id(app, "mic:default", "Default", true, settings.microphone.is_none(), None::<&str>)?)?;
-    for (i, name) in microphones().iter().enumerate() {
+    microphone.append(&CheckMenuItem::with_id(app, DEFAULT_MIC, "Default", true, settings.microphone.is_none(), None::<&str>)?)?;
+    for name in microphones(app) {
         let on = settings.microphone.as_deref() == Some(name.as_str());
-        microphone.append(&CheckMenuItem::with_id(app, format!("mic:{i}"), name, true, on, None::<&str>)?)?;
+        microphone.append(&CheckMenuItem::with_id(app, format!("mic:{name}"), &name, true, on, None::<&str>)?)?;
     }
     menu.append(&microphone)?;
 
@@ -142,16 +151,33 @@ fn sentence(text: &str) -> String {
     chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
 
-/// The microphones, listed again when the last list is a few seconds old.
-fn microphones() -> Vec<String> {
-    let mut cached = lock(&MICROPHONES);
-    if cached.1.is_none_or(|at| at.elapsed() > LIST_EVERY) {
-        cached.0 = speechkit::io::Microphone::list()
-            .map(|list| list.into_iter().map(|m| m.name).collect())
-            .unwrap_or_default();
-        cached.1 = Some(Instant::now());
+/// The microphones as last listed. When that list is a few seconds old,
+/// they are listed again on another thread, and the menu is rebuilt if
+/// they changed.
+fn microphones(app: &AppHandle) -> Vec<String> {
+    let (list, stale) = {
+        let cached = lock(&MICROPHONES);
+        (cached.0.clone(), cached.1.is_none_or(|at| at.elapsed() > LIST_EVERY))
+    };
+    if stale && !LISTING.swap(true, Ordering::SeqCst) {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let names: Vec<String> = speechkit::io::Microphone::list()
+                .map(|list| list.into_iter().map(|m| m.name).collect())
+                .unwrap_or_default();
+            let changed = {
+                let mut cached = lock(&MICROPHONES);
+                let changed = cached.0 != names;
+                *cached = (names, Some(Instant::now()));
+                changed
+            };
+            LISTING.store(false, Ordering::SeqCst);
+            if changed {
+                refresh(&app);
+            }
+        });
     }
-    cached.0.clone()
+    list
 }
 
 /// Acts on a menu item.
@@ -176,9 +202,11 @@ pub fn on_event(app: &AppHandle, event: MenuEvent) {
             } else if let Some(language) = LANGUAGES.iter().find(|(_, item, _)| *item == id) {
                 state.change(|s| s.language = language.0);
                 ui::refresh(app);
-            } else if let Some(microphone) = id.strip_prefix("mic:") {
-                let name = microphone.parse::<usize>().ok().and_then(|i| lock(&MICROPHONES).0.get(i).cloned());
-                state.change(|s| s.microphone = name);
+            } else if id == DEFAULT_MIC {
+                state.change(|s| s.microphone = None);
+                ui::refresh(app);
+            } else if let Some(name) = id.strip_prefix("mic:") {
+                state.change(|s| s.microphone = Some(name.to_owned()));
                 ui::refresh(app);
             }
         }

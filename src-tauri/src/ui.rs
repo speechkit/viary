@@ -1,9 +1,12 @@
 //! Viary's windows and menu bar icon: the pill overlay, the menu bar
 //! popover, and the main window.
 
-use std::sync::{
-    Mutex,
-    atomic::{AtomicU8, Ordering},
+use std::{
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicU8, Ordering},
+    },
+    time::Duration,
 };
 
 use tauri::{
@@ -99,14 +102,26 @@ pub fn set_app_icon() {
 /// Tells every window to reload what it shows from `get_state`.
 pub fn refresh(app: &AppHandle) {
     let _ = app.emit("state-changed", ());
-    // An engine loading, a permission granted: the icon may change too. On
-    // a thread of its own, so no caller's lock is held while it reads.
-    let redraw = app.clone();
-    std::thread::spawn(move || redraw_tray(&redraw));
-    // GNOME shows the menu without asking first: keep it current.
-    #[cfg(target_os = "linux")]
-    crate::tray_menu::refresh(app);
+    // An engine loading, a permission granted: the icon may change too,
+    // and on Linux the menu, which GNOME shows without asking first. On a
+    // thread of its own, so no caller's lock is held while they read the
+    // state, and once for a burst of changes.
+    if !TRAY_PENDING.swap(true, Ordering::SeqCst) {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            // Cleared before reading, so a change from here on queues
+            // another update.
+            TRAY_PENDING.store(false, Ordering::SeqCst);
+            redraw_tray(&app);
+            #[cfg(target_os = "linux")]
+            crate::tray_menu::refresh(&app);
+        });
+    }
 }
+
+/// Whether a tray update is queued by [`refresh`].
+static TRAY_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub fn show_pill(app: &AppHandle, view: &PillView) {
     app.state::<App>().set_pill(view.clone());
@@ -361,7 +376,7 @@ pub fn build_setup(app: &AppHandle, step: Option<&str>) -> tauri::Result<Webview
         Some(step) => WebviewUrl::App(format!("index.html?step={step}").into()),
         None => WebviewUrl::default(),
     };
-    WebviewWindowBuilder::new(app, "setup", url)
+    let window = WebviewWindowBuilder::new(app, "setup", url)
         .title("Set up Viary")
         .inner_size(1040.0, 700.0)
         .resizable(false)
@@ -369,7 +384,22 @@ pub fn build_setup(app: &AppHandle, step: Option<&str>) -> tauri::Result<Webview
         .decorations(false)
         .center()
         .theme(Some(tauri::Theme::Light))
-        .build()
+        .build()?;
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        // Closed some other way (Alt+F4): its page cannot end its tests.
+        if let tauri::WindowEvent::Destroyed = event {
+            end_setup_tests(&handle);
+        }
+    });
+    Ok(window)
+}
+
+/// Ends the setup window's talk key and microphone tests, so the key
+/// starts dictations again and the microphone is let go.
+pub fn end_setup_tests(app: &AppHandle) {
+    app.state::<App>().key_test.store(false, Ordering::SeqCst);
+    crate::mic_test::stop();
 }
 
 /// The tip window: the card, and room around it for its shadow.

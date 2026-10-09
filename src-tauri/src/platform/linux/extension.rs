@@ -200,12 +200,17 @@ async fn actions(app: &AppHandle) -> zbus::Result<()> {
     let connection = super::session_bus().await?;
     let rule = MatchRule::builder()
         .msg_type(Type::Signal)
+        .path(PATH)?
         .interface(BUS)?
         .member("PillAction")?
         .build();
     let mut stream = MessageStream::for_match_rule(rule, &connection, None).await?;
     while let Some(message) = stream.next().await {
         let Ok(message) = message else { continue };
+        if !super::sent_by(&message, BUS).await {
+            tracing::warn!("a PillAction signal not from Viary's extension; ignored");
+            continue;
+        }
         let Ok(action) = message.body().deserialize::<String>() else {
             continue;
         };
@@ -226,6 +231,14 @@ mod tests {
     #[ignore = "needs GNOME Shell running Viary's extension"]
     fn gnome_extension_answers() {
         assert_eq!(super::status(), super::Status::Active);
+        // The status check connected, owning Viary's client name: the
+        // extension answers this process as it answers Viary.
+        tauri::async_runtime::block_on(super::call(
+            "ShowPill",
+            &(r#"{"kind":"hint","text":"CI"}"#,),
+        ))
+        .expect("ShowPill");
+        tauri::async_runtime::block_on(super::call("SetLevel", &(0.1_f64,))).expect("SetLevel");
         assert!(super::focused_app().is_some(), "FocusedApp did not answer");
         super::paste().expect("Paste");
         super::undo().expect("Undo");

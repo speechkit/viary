@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use clipboard_win::{formats, raw};
 
-/// A copy of the clipboard's contents.
+/// A copy of the clipboard's contents; `None` when the clipboard could not
+/// be read, so there is nothing to put back.
 pub struct Saved {
-    formats: Vec<(u32, Vec<u8>)>,
+    formats: Option<Vec<(u32, Vec<u8>)>>,
 }
 
 /// Formats Windows makes from others, or that hold GDI handles rather than
@@ -50,7 +51,7 @@ impl Drop for Clipboard {
 
 pub fn save() -> Saved {
     let Some(_open) = open() else {
-        return Saved { formats: Vec::new() };
+        return Saved { formats: None };
     };
     let formats = raw::EnumFormats::new()
         .filter(|format| !SKIPPED.contains(format))
@@ -60,7 +61,9 @@ pub fn save() -> Saved {
             Some((format, bytes))
         })
         .collect();
-    Saved { formats }
+    Saved {
+        formats: Some(formats),
+    }
 }
 
 /// Marks a write as one clipboard history and cloud sync leave out, and
@@ -103,8 +106,13 @@ pub fn set_transient_text(text: &str) -> isize {
     write_text(text, true)
 }
 
-/// Puts `saved` back, unless something else was copied since `ours`.
+/// Puts `saved` back, unless something else was copied since `ours`. A
+/// clipboard that could not be saved is left with the dictated text rather
+/// than emptied.
 pub fn restore(saved: Saved, ours: isize) {
+    let Some(formats) = saved.formats else {
+        return;
+    };
     if raw::seq_num().map_or(0, |n| n.get() as isize) != ours {
         return;
     }
@@ -112,7 +120,7 @@ pub fn restore(saved: Saved, ours: isize) {
         return;
     };
     let _ = raw::empty();
-    for (format, bytes) in &saved.formats {
+    for (format, bytes) in &formats {
         if let Err(error) = raw::set_without_clear(*format, bytes) {
             tracing::debug!(format, %error, "cannot restore a clipboard format");
         }

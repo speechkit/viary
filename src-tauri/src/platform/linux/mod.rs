@@ -94,11 +94,48 @@ fn app() -> Option<&'static AppHandle> {
     DESKTOP.get().map(|d| &d.app)
 }
 
+/// The name Viary's session bus connection owns. Viary's extension answers
+/// only the client that owns it.
+const CLIENT_NAME: &str = "app.viary.App";
+
 /// The session bus, connected once: the pill's level alone calls it
 /// twenty times a second.
 async fn session_bus() -> ashpd::zbus::Result<ashpd::zbus::Connection> {
     static BUS: tokio::sync::OnceCell<ashpd::zbus::Connection> = tokio::sync::OnceCell::const_new();
-    BUS.get_or_try_init(ashpd::zbus::Connection::session).await.cloned()
+    BUS.get_or_try_init(|| async {
+        let connection = ashpd::zbus::Connection::session().await?;
+        if let Err(error) = connection.request_name(CLIENT_NAME).await {
+            tracing::warn!(%error, "cannot own {CLIENT_NAME}; the GNOME Shell extension will not answer");
+        }
+        Ok::<_, ashpd::zbus::Error>(connection)
+    })
+    .await
+    .cloned()
+}
+
+/// Whether `message` came from the client that owns `name` now. Any client
+/// on the session bus can send a signal naming any interface, so a signal
+/// is only trusted from the service it claims to be from.
+async fn sent_by(message: &ashpd::zbus::Message, name: &str) -> bool {
+    let Some(sender) = message.header().sender().map(ToString::to_string) else {
+        return false;
+    };
+    let Ok(connection) = session_bus().await else {
+        return false;
+    };
+    let owner = connection
+        .call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "GetNameOwner",
+            &(name,),
+        )
+        .await;
+    owner
+        .ok()
+        .and_then(|reply| reply.body().deserialize::<String>().ok())
+        .is_some_and(|owner| owner == sender)
 }
 
 /// What the setup window and Settings show about the desktop.
