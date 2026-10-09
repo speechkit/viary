@@ -8,7 +8,7 @@
 use std::{
     path::PathBuf,
     sync::{
-        OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU8, Ordering},
     },
 };
@@ -17,10 +17,12 @@ use ashpd::zbus::{self, MatchRule, MessageStream, message::Type};
 use futures_util::StreamExt;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
+use tokio::sync::Notify;
 
 use crate::{
     App,
     dictation::{Msg, PillAction, PillView},
+    lock,
 };
 
 const UUID: &str = "viary@viary.app";
@@ -156,55 +158,67 @@ pub fn focused_app() -> Option<(i32, String)> {
     })
 }
 
-/// A change to the shell's pill.
-enum Update {
-    Pill(String),
-    Level(f64),
-    Partial(u64, String),
+/// What the shell's pill has yet to be sent.
+#[derive(Default)]
+struct Pending {
+    /// Pill views, every one in order: each is a state the user may need
+    /// to see, and they must not arrive out of order.
+    views: Vec<String>,
+    /// Only the newest level and live text: older ones are stale by the
+    /// time a slow call returns, and would hold up the views behind them.
+    level: Option<f64>,
+    partial: Option<(u64, String)>,
 }
 
-/// Sends `update` after the ones before it: calls made from tasks of their
-/// own could reach the shell out of order, leaving the pill on a state the
-/// dictation has left.
-fn send(update: Update) {
-    static UPDATES: OnceLock<tokio::sync::mpsc::UnboundedSender<Update>> = OnceLock::new();
-    let updates = UPDATES.get_or_init(|| {
-        let (sender, mut received) = tokio::sync::mpsc::unbounded_channel();
+static PENDING: Mutex<Pending> = Mutex::new(Pending {
+    views: Vec::new(),
+    level: None,
+    partial: None,
+});
+
+/// Queues a change and wakes the one task that sends them, in turn.
+fn send(queue: impl FnOnce(&mut Pending)) {
+    static WAKE: OnceLock<Arc<Notify>> = OnceLock::new();
+    let wake = WAKE.get_or_init(|| {
+        let wake = Arc::new(Notify::new());
+        let waiting = wake.clone();
         tauri::async_runtime::spawn(async move {
-            while let Some(update) = received.recv().await {
-                match update {
-                    Update::Pill(json) => {
-                        if let Err(error) = call("ShowPill", &(json,)).await {
-                            tracing::warn!(%error, "cannot show the pill in GNOME Shell");
-                        }
+            loop {
+                waiting.notified().await;
+                let Pending { views, level, partial } = std::mem::take(&mut *lock(&PENDING));
+                for json in views {
+                    if let Err(error) = call("ShowPill", &(json,)).await {
+                        tracing::warn!(%error, "cannot show the pill in GNOME Shell");
                     }
-                    Update::Level(level) => {
-                        let _ = call("SetLevel", &(level,)).await;
-                    }
-                    Update::Partial(token, text) => {
-                        let _ = call("SetPartial", &(token, text)).await;
-                    }
+                }
+                if let Some((token, text)) = partial {
+                    let _ = call("SetPartial", &(token, text)).await;
+                }
+                if let Some(level) = level {
+                    let _ = call("SetLevel", &(level,)).await;
                 }
             }
         });
-        sender
+        wake
     });
-    let _ = updates.send(update);
+    queue(&mut lock(&PENDING));
+    // Stored if the task is busy sending: it goes round again.
+    wake.notify_one();
 }
 
 /// Shows `view` in the shell's pill.
 pub fn show_pill(view: &PillView) {
     if let Ok(json) = serde_json::to_string(view) {
-        send(Update::Pill(json));
+        send(|pending| pending.views.push(json));
     }
 }
 
 pub fn level(level: f32) {
-    send(Update::Level(f64::from(level)));
+    send(|pending| pending.level = Some(f64::from(level)));
 }
 
 pub fn partial(token: u64, text: String) {
-    send(Update::Partial(token, text));
+    send(|pending| pending.partial = Some((token, text)));
 }
 
 /// Acts on the pill's buttons, for as long as Viary runs.

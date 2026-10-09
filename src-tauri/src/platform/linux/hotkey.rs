@@ -84,6 +84,54 @@ pub fn since_release() -> Option<Duration> {
     lock(&RELEASED).map(|at| at.elapsed())
 }
 
+/// The talk shortcut's keys as GNOME has them, for the UI to name: the
+/// user can change them in GNOME Settings. `None` until GNOME says, or on
+/// X11, where Viary grabs Ctrl+Alt+Space itself.
+static TRIGGER: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn trigger() -> Option<String> {
+    lock(&TRIGGER).clone()
+}
+
+/// Records the shortcut's keys; true if they changed.
+fn set_trigger(trigger: Option<&str>) -> bool {
+    let label = trigger.map(label).filter(|label| !label.is_empty());
+    let mut current = lock(&TRIGGER);
+    let changed = *current != label;
+    *current = label;
+    changed
+}
+
+/// The talk shortcut's trigger among the portal's `shortcuts`.
+fn talk_trigger(shortcuts: &[ashpd::desktop::global_shortcuts::Shortcut]) -> Option<&str> {
+    shortcuts.iter().find(|s| s.id() == TALK).map(|s| s.trigger_description())
+}
+
+/// A shortcut as people read it: GNOME's "<Control><Alt>space" is
+/// "Ctrl+Alt+Space". Text already in that form is kept.
+fn label(trigger: &str) -> String {
+    let mut rest = trigger.trim();
+    if !rest.starts_with('<') {
+        return rest.to_owned();
+    }
+    let mut keys = Vec::new();
+    while let Some(after) = rest.strip_prefix('<')
+        && let Some((modifier, tail)) = after.split_once('>')
+    {
+        keys.push(match modifier {
+            "Control" | "Primary" | "Ctrl" => "Ctrl".to_owned(),
+            "Super" => "Super".to_owned(),
+            other => other.to_owned(),
+        });
+        rest = tail;
+    }
+    let mut chars = rest.chars();
+    if let Some(first) = chars.next() {
+        keys.push(first.to_uppercase().chain(chars).collect());
+    }
+    keys.join("+")
+}
+
 pub fn status() -> Status {
     LISTENER.get().map(|l| *lock(&l.status)).unwrap_or_default()
 }
@@ -160,6 +208,7 @@ async fn watch_portal(listener: Arc<Listener>) {
         Ok(()) => {}
         Err(error) => {
             tracing::info!(%error, "no GlobalShortcuts portal; using a GNOME custom shortcut");
+            read_custom_trigger();
             set_status(&listener, Status { mode: Mode::Toggle, bound: custom_bound() });
             listen_socket(listener);
         }
@@ -171,8 +220,10 @@ async fn open_portal(listener: &Arc<Listener>) -> ashpd::Result<()> {
     let session = proxy.create_session(Default::default()).await?;
     let listed = proxy.list_shortcuts(&session, Default::default()).await?.response()?;
     let bound = listed.shortcuts().iter().any(|s| s.id() == TALK);
+    set_trigger(talk_trigger(listed.shortcuts()));
     let mut activated = std::pin::pin!(proxy.receive_activated().await?);
     let mut deactivated = std::pin::pin!(proxy.receive_deactivated().await?);
+    let mut changed = std::pin::pin!(proxy.receive_shortcuts_changed().await?);
     *listener.portal.lock().await = Some((proxy, session));
     set_status(listener, Status { mode: Mode::Hold, bound });
 
@@ -191,7 +242,17 @@ async fn open_portal(listener: &Arc<Listener>) -> ashpd::Result<()> {
             }
         }
     };
-    futures_util::future::join(downs, ups).await;
+    // Changed in GNOME Settings: name the new keys.
+    let renamed = async {
+        while let Some(event) = changed.next().await {
+            if set_trigger(talk_trigger(event.shortcuts()))
+                && let Some(app) = app()
+            {
+                crate::ui::refresh(app);
+            }
+        }
+    };
+    futures_util::future::join3(downs, ups, renamed).await;
     Ok(())
 }
 
@@ -201,6 +262,7 @@ pub fn bind() -> Result<(), String> {
     match status().mode {
         Mode::Toggle => {
             add_custom()?;
+            read_custom_trigger();
             set_status(&listener, Status { mode: Mode::Toggle, bound: custom_bound() });
             Ok(())
         }
@@ -215,6 +277,7 @@ pub fn bind() -> Result<(), String> {
                 .await
                 .and_then(|request| request.response())
                 .map_err(|e| e.to_string())?;
+            set_trigger(talk_trigger(bound.shortcuts()));
             let bound = bound.shortcuts().iter().any(|s| s.id() == TALK);
             drop(portal);
             set_status(&listener, Status { mode: Mode::Hold, bound });
@@ -263,7 +326,19 @@ fn private_temp_dir() -> Option<PathBuf> {
 /// not listening: the same as through it.
 pub fn toggle() {
     if let Some(listener) = LISTENER.get() {
-        (listener.on_event)(HotkeyEvent::Toggle);
+        toggled(listener);
+    }
+}
+
+/// The custom shortcut was pressed. Its keys are read again after: GNOME
+/// does not say when the user changes them, and a press with new keys is
+/// the first sign.
+fn toggled(listener: &Listener) {
+    (listener.on_event)(HotkeyEvent::Toggle);
+    if read_custom_trigger()
+        && let Some(app) = app()
+    {
+        crate::ui::refresh(app);
     }
 }
 
@@ -300,7 +375,7 @@ fn listen_socket(listener: Arc<Listener>) {
                 }
                 let mut word = String::new();
                 if (&stream).take(16).read_to_string(&mut word).is_ok() && word == "toggle" {
-                    (listener.on_event)(HotkeyEvent::Toggle);
+                    toggled(&listener);
                 }
             }
         });
@@ -322,6 +397,15 @@ fn custom_list() -> Vec<String> {
     gsettings_list(MEDIA_KEYS, "custom-keybindings").unwrap_or_default()
 }
 
+/// Reads the custom shortcut's keys; true if they changed.
+fn read_custom_trigger() -> bool {
+    let schema = format!("{MEDIA_KEYS}.custom-keybinding:{CUSTOM}");
+    let binding = custom_bound()
+        .then(|| gsettings(&["get", &schema, "binding"]).ok())
+        .flatten();
+    set_trigger(binding.as_deref().map(|b| b.trim_matches('\'')))
+}
+
 fn custom_bound() -> bool {
     custom_list().iter().any(|p| p == CUSTOM)
 }
@@ -340,6 +424,14 @@ fn add_custom() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_gnome_accelerator_reads_as_keys() {
+        assert_eq!(super::label("<Control><Alt>space"), "Ctrl+Alt+Space");
+        assert_eq!(super::label("<Super>F9"), "Super+F9");
+        assert_eq!(super::label("Ctrl+Alt+Space"), "Ctrl+Alt+Space");
+        assert_eq!(super::label(""), "");
+    }
+
     #[test]
     fn the_command_quotes_the_path() {
         assert!(super::command().ends_with("' --toggle"));

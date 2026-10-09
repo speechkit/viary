@@ -188,7 +188,7 @@ struct Snapshot {
     keys: Keys,
     permissions: permissions::Permissions,
     hotkey_active: bool,
-    hotkey_name: &'static str,
+    hotkey_name: String,
     pill: PillView,
     /// Dictation paused from the tray.
     paused: Option<pause::Paused>,
@@ -221,7 +221,7 @@ fn get_state(app: AppHandle, state: State<'_, App>) -> Snapshot {
         },
         permissions: permissions::check(),
         hotkey_active: state.hotkey.get().is_some_and(HotkeyListener::is_active),
-        hotkey_name: dictation::key_name(settings.hotkey),
+        hotkey_name: dictation::hotkey_name(settings.hotkey),
         pill: lock(&state.pill).clone(),
         paused: state.pause.get(),
         desktop: platform::desktop(),
@@ -741,9 +741,12 @@ fn set_key_test(state: State<'_, App>, on: bool) {
     state.key_test.store(on, Ordering::SeqCst);
 }
 
-/// Setup ran to its end: it does not open again.
+/// Setup ran to its end: it does not open again. Async, so it runs off the
+/// main thread: building the tip's web view from a synchronous command
+/// deadlocks on Windows (WebView2).
 #[tauri::command]
-fn finish_setup(app: AppHandle, state: State<'_, App>) {
+async fn finish_setup(app: AppHandle) -> CmdResult<()> {
+    let state = app.state::<App>();
     ui::end_setup_tests(&app);
     let before = state.settings();
     state.change(|s| {
@@ -761,6 +764,7 @@ fn finish_setup(app: AppHandle, state: State<'_, App>) {
         tracing::warn!(%error, "cannot show the tray tip");
     }
     ui::refresh(&app);
+    Ok(())
 }
 
 /// Starts or ends the setup window's microphone test (`mic-level` events).

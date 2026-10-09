@@ -309,7 +309,7 @@ impl Controller {
                 Msg::Tapped(token) if token == self.token => {
                     // No second tap: drop the recording and say how to dictate.
                     if matches!(self.phase, Phase::Tapped(..)) {
-                        let key = key_name(self.settings().hotkey);
+                        let key = hotkey_name(self.settings().hotkey);
                         self.hint(format!("Hold {key} to dictate, or double-tap it"));
                     }
                 }
@@ -1237,6 +1237,12 @@ pub fn engine_name(settings: &Settings, id: &str) -> String {
             .and_then(|local| settings.local(local))
             .map_or_else(|| "on-device".into(), |m| m.name.clone()),
     }
+}
+
+/// The talk key's name as the user knows it: GNOME's shortcut as they set
+/// it, or [`key_name`].
+pub fn hotkey_name(hotkey: Hotkey) -> String {
+    platform::hotkey_label().unwrap_or_else(|| key_name(hotkey).to_owned())
 }
 
 pub fn key_name(hotkey: Hotkey) -> &'static str {

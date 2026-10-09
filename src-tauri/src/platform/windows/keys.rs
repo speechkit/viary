@@ -26,8 +26,7 @@ const WAIT_FOR_KEYS: Duration = Duration::from_millis(1500);
 fn keys_released() -> bool {
     let deadline = Instant::now() + WAIT_FOR_KEYS;
     loop {
-        // SAFETY: plain queries.
-        let held = IN_THE_WAY.iter().any(|vk| unsafe { GetAsyncKeyState(i32::from(vk.0)) } < 0);
+        let held = IN_THE_WAY.iter().copied().any(is_down);
         if !held {
             return true;
         }
@@ -62,25 +61,29 @@ fn send(inputs: &[INPUT]) -> Result<(), String> {
     }
 }
 
+fn is_down(vk: VIRTUAL_KEY) -> bool {
+    // SAFETY: a plain query.
+    unsafe { GetAsyncKeyState(i32::from(vk.0)) < 0 }
+}
+
 fn control(letter: u8) -> Result<(), String> {
     if !keys_released() {
         return Err("a modifier key is still held".into());
     }
+    // Whether the user holds Ctrl: Windows says so before Viary presses it
+    // too, and the hook, which can miss a release, agrees.
+    let held_before = is_down(VK_CONTROL) && super::hotkey::ctrl_held();
     let letter = VIRTUAL_KEY(u16::from(letter));
-    if let Err(error) = send(&[key(VK_CONTROL, false), key(letter, false), key(letter, true)]) {
-        // Part of it may have gone in: leave no Ctrl down the user let go.
-        if !super::hotkey::ctrl_held() {
-            let _ = send(&[key(VK_CONTROL, true)]);
-        }
-        return Err(error);
-    }
+    let sent = send(&[key(VK_CONTROL, false), key(letter, false), key(letter, true)]);
     // A Ctrl the user still holds (the Ctrl + Win talk key, let go Win
     // first) stays down: releasing it here would turn their next Ctrl+S
-    // into an "s".
-    if super::hotkey::ctrl_held() {
-        return Ok(());
+    // into an "s". Any other Ctrl Viary pressed is let go, even when the
+    // paste failed partway. Still held: the hook has seen no release since.
+    if !(held_before && super::hotkey::ctrl_held()) {
+        let released = send(&[key(VK_CONTROL, true)]);
+        return sent.and(released);
     }
-    send(&[key(VK_CONTROL, true)])
+    sent
 }
 
 /// Ctrl+V.

@@ -68,6 +68,15 @@ pub fn keyboard() -> Option<Keyboard> {
     None
 }
 
+/// The talk key's name where the desktop, not Viary, decides the keys:
+/// GNOME's shortcut, which the user can change in GNOME Settings.
+pub fn hotkey_label() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    return hotkey::trigger();
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
 /// The system Viary was built for, as the web views name it.
 pub const NAME: &str = if cfg!(target_os = "macos") {
     "macos"
