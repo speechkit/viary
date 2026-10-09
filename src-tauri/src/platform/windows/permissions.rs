@@ -85,3 +85,14 @@ pub fn open_settings(kind: &str) {
         tracing::warn!(%error, "cannot open Settings");
     }
 }
+
+/// What is missing for dictation, for the tray icon, if anything.
+pub fn missing(hotkey_active: bool) -> Option<&'static str> {
+    if !check().microphone {
+        Some("microphone blocked")
+    } else if !hotkey_active {
+        Some("the talk key is not working")
+    } else {
+        None
+    }
+}

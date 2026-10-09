@@ -53,11 +53,15 @@ pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let menu = Menu::new(app)?;
 
     if cfg!(target_os = "linux") {
-        // GNOME shows no tooltip: the menu says what state Viary is in.
-        let status = match state.engines.status().active {
-            Some(info) if info.on_device => "Ready · on-device".to_owned(),
-            Some(info) => format!("Ready · {}", info.kind),
-            None => "No voice engine".to_owned(),
+        // GNOME shows no tooltip: the menu says what state Viary is in,
+        // as the tooltip would.
+        let status = match ui::tray_status(app) {
+            (ui::TrayState::Idle, _) => match state.engines.status().active {
+                Some(info) if info.on_device => "Ready · on-device".to_owned(),
+                Some(info) => format!("Ready · {}", info.kind),
+                None => "No voice engine".to_owned(),
+            },
+            (_, text) => sentence(&text),
         };
         menu.append(&MenuItem::with_id(app, "status", status, false, None::<&str>)?)?;
         menu.append(&MenuItem::with_id(app, "hint", format!("Hold {key} to talk"), false, None::<&str>)?)?;
@@ -130,6 +134,12 @@ pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     }
     menu.append(&MenuItem::with_id(app, "quit", if cfg!(target_os = "linux") { "Quit" } else { "Quit Viary" }, true, None::<&str>)?)?;
     Ok(menu)
+}
+
+/// "listening" as a menu line: "Listening".
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
 
 /// The microphones, listed again when the last list is a few seconds old.

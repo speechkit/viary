@@ -51,3 +51,8 @@ pub fn open_settings(kind: &str) {
         tracing::warn!(%error, "cannot open GNOME Settings");
     }
 }
+
+/// What is missing for dictation, for the indicator, if anything.
+pub fn missing(hotkey_active: bool) -> Option<&'static str> {
+    (!hotkey_active).then_some("set up the talk shortcut")
+}
