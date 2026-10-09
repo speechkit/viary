@@ -694,7 +694,7 @@ fn request_permission(app: AppHandle, kind: String) {
 fn pause_dictation(app: AppHandle, state: State<'_, App>, minutes: Option<u64>) {
     state
         .pause
-        .start(&app, minutes.map(|m| Duration::from_secs(m * 60)));
+        .start(&app, minutes.map(|m| Duration::from_secs(m.saturating_mul(60))));
 }
 
 #[tauri::command]
@@ -793,10 +793,16 @@ fn open_main(app: AppHandle, page: String) {
     ui::open_main(&app, &page);
 }
 
-/// ⌥⌘N (Ctrl+Alt+N elsewhere), from anywhere: Voice Notes, recording.
+/// From anywhere: Voice Notes, recording. ⌥⌘N on macOS (Win+Alt+N on
+/// Windows, Ctrl+Alt+N on Linux).
 #[cfg(target_os = "macos")]
 const NEW_NOTE_SHORTCUT: (Modifiers, Code) = (Modifiers::ALT.union(Modifiers::SUPER), Code::KeyN);
-#[cfg(not(target_os = "macos"))]
+/// Not Ctrl+Alt+N: Windows reports AltGr as Ctrl+Alt, so a global
+/// Ctrl+Alt+N would take AltGr+N (ń on Polish) from every app.
+#[cfg(target_os = "windows")]
+const NEW_NOTE_SHORTCUT: (Modifiers, Code) = (Modifiers::SUPER.union(Modifiers::ALT), Code::KeyN);
+/// X11 and GNOME keep AltGr apart from Ctrl+Alt.
+#[cfg(target_os = "linux")]
 const NEW_NOTE_SHORTCUT: (Modifiers, Code) = (Modifiers::CONTROL.union(Modifiers::ALT), Code::KeyN);
 
 /// Opens Voice Notes and starts recording, unless a note already is.

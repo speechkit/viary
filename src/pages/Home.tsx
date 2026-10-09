@@ -90,12 +90,15 @@ export function HomePage({ s, go }: { s: Snapshot; go: Go }) {
   const seconds = week.reduce((sum, h) => sum + h.durationMs, 0) / 1000;
   const wpm = seconds > 5 ? Math.round(words / (seconds / 60)) : null;
   const saved = Math.max(0, Math.round(words / TYPING_WPM - seconds / 60));
-  // Windows needs nothing but the microphone switch; macOS needs the key
-  // watched and permission to type.
+  // Windows needs nothing but the microphone switch; Linux, the talk
+  // shortcut from GNOME (typing can rightly be left to the clipboard);
+  // macOS, the key watched and permission to type.
   const allowed =
     PLATFORM === "windows"
       ? s.permissions.microphone !== false
-      : (s.permissions.inputMonitoring || s.hotkeyActive) && s.permissions.accessibility;
+      : PLATFORM === "linux"
+        ? s.hotkeyActive
+        : (s.permissions.inputMonitoring || s.hotkeyActive) && s.permissions.accessibility;
   const setupDone = !!s.engine.active && allowed;
   const today = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
 
@@ -145,6 +148,17 @@ export function HomePage({ s, go }: { s: Snapshot; go: Go }) {
               action={
                 <button type="button" className={btn} onClick={() => api.requestPermission("microphone")}>
                   Open {SYSTEM_SETTINGS}
+                </button>
+              }
+            />
+          ) : PLATFORM === "linux" ? (
+            <Step
+              done={s.hotkeyActive}
+              title={`Let GNOME hand ${s.hotkeyName} to Viary`}
+              text="The talk shortcut, and how Viary types into apps, are in Settings."
+              action={
+                <button type="button" className={btn} onClick={() => go("settings")}>
+                  Settings
                 </button>
               }
             />

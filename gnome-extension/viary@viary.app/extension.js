@@ -4,8 +4,11 @@
 // and show its dictation pill, whose buttons come back as a signal.
 //
 // Only Viary may call it: the client that owns VIARY_NAME on the session
-// bus. Other programs get AccessDenied, so the shell's keyboard and focus,
-// which Wayland keeps from apps, stay out of their reach.
+// bus. Other programs get AccessDenied, so apps on the bus cannot use the
+// shell's keyboard and focus, which Wayland keeps from them. This is not
+// a defense against a hostile program running as the user: one could own
+// the name before Viary does, but it could as well rewrite this file,
+// which lives in the user's home.
 
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';

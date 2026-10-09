@@ -163,18 +163,29 @@ pub fn active_window() -> Option<(Window, i32, String)> {
     Some((window, pid, class))
 }
 
+/// What [`activate`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activation {
+    /// The window was active already.
+    Already,
+    /// The window manager brought it forward.
+    Moved,
+    /// It is not active.
+    Failed,
+}
+
 /// Asks the window manager to raise and focus `window`, and waits up to
 /// `timeout` for it to: the window manager moves the focus in its own
-/// time. Returns whether `window` is active.
-pub fn activate(window: Window, timeout: Duration) -> bool {
+/// time.
+pub fn activate(window: Window, timeout: Duration) -> Activation {
     let Ok((conn, root)) = connect() else {
-        return false;
+        return Activation::Failed;
     };
     let Ok(active) = atom(&conn, "_NET_ACTIVE_WINDOW") else {
-        return false;
+        return Activation::Failed;
     };
     if active_on(&conn, root, active) == Some(window) {
-        return true;
+        return Activation::Already;
     }
     // Source 2: a pager, which window managers obey without focus-stealing
     // checks.
@@ -189,15 +200,15 @@ pub fn activate(window: Window, timeout: Duration) -> bool {
         .is_ok()
         && conn.flush().is_ok();
     if !sent {
-        return false;
+        return Activation::Failed;
     }
     let deadline = Instant::now() + timeout;
     loop {
         if active_on(&conn, root, active) == Some(window) {
-            return true;
+            return Activation::Moved;
         }
         if Instant::now() >= deadline {
-            return false;
+            return Activation::Failed;
         }
         std::thread::sleep(Duration::from_millis(15));
     }

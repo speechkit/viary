@@ -40,12 +40,15 @@ pub fn activate(target: &TargetApp) -> bool {
         return true;
     }
     // Ctrl+V sent before the window is in front would go to the one that is.
-    let front = x11::activate(target.window, Duration::from_millis(600));
-    if front {
-        // Give the window a moment to put its caret back.
-        std::thread::sleep(Duration::from_millis(60));
+    match x11::activate(target.window, Duration::from_millis(600)) {
+        x11::Activation::Already => true,
+        x11::Activation::Moved => {
+            // Give the window a moment to put its caret back.
+            std::thread::sleep(Duration::from_millis(60));
+            true
+        }
+        x11::Activation::Failed => false,
     }
-    front
 }
 
 /// Whether the system keeps Viary's keystrokes from `target`: never here.
