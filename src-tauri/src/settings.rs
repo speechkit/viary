@@ -173,8 +173,32 @@ impl Default for DictionaryEntry {
 impl DictionaryEntry {
     /// Whether it applies in the app named `app`.
     pub fn applies_in(&self, app: &str) -> bool {
-        self.apps.is_empty() || self.apps.iter().any(|a| a.eq_ignore_ascii_case(app))
+        self.apps.is_empty() || self.apps.iter().any(|a| app_match(a, app).is_some())
     }
+}
+
+/// An app name's words, lowercased, without punctuation:
+/// "gnome-text-editor" is `["gnome", "text", "editor"]`.
+fn app_words(name: &str) -> Vec<String> {
+    name.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether `entered`, an app as the user named it, names `app`, as the
+/// system reports it: its words, in order, among the app's, ignoring case
+/// and punctuation. Systems name the same app differently ("Mail", "Microsoft
+/// Outlook", "gnome-text-editor"), so "Outlook" matches "Microsoft Outlook",
+/// while "Mail" does not match "Mailspring". `Some` ranks the match: exact
+/// first, then the one with more words, so the most specific entry wins.
+pub fn app_match(entered: &str, app: &str) -> Option<(bool, usize)> {
+    let wanted = app_words(entered);
+    let words = app_words(app);
+    if wanted.is_empty() || !words.windows(wanted.len()).any(|w| w == wanted.as_slice()) {
+        return None;
+    }
+    Some((wanted.len() == words.len(), wanted.len()))
 }
 
 /// How polished text should read in an app.
@@ -258,8 +282,9 @@ impl PolishSettings {
     pub fn tone_in(&self, app: &str) -> Tone {
         self.tones
             .iter()
-            .find(|t| t.app.eq_ignore_ascii_case(app))
-            .map_or(self.default_tone, |t| t.tone)
+            .filter_map(|t| Some((app_match(&t.app, app)?, t.tone)))
+            .max_by_key(|(rank, _)| *rank)
+            .map_or(self.default_tone, |(_, tone)| tone)
     }
 
     /// These settings with the fields in `patch` changed, as the web views
@@ -584,5 +609,26 @@ mod tests {
         let backup = fs::read_to_string(dir.join("settings.json.bak")).unwrap();
         assert!(backup.contains("leftShift"), "{backup}");
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_app_matches_by_its_words() {
+        assert!(super::app_match("Outlook", "Microsoft Outlook").is_some());
+        assert!(super::app_match("text editor", "gnome-text-editor").is_some());
+        assert!(super::app_match("MAIL", "Mail").is_some());
+        assert!(super::app_match("Mail", "Mailspring").is_none());
+        assert!(super::app_match("Code", "Xcode").is_none());
+        assert!(super::app_match("", "Mail").is_none());
+        assert!(super::app_match("微信", "微信").is_some());
+    }
+
+    #[test]
+    fn the_most_specific_tone_wins() {
+        let mut polish = PolishSettings::default();
+        polish.set_tone("Code", Some(Tone::Literal));
+        polish.set_tone("Visual Studio Code", Some(Tone::Casual));
+        assert_eq!(polish.tone_in("Visual Studio Code"), Tone::Casual);
+        assert_eq!(polish.tone_in("Code - Insiders"), Tone::Literal);
+        assert_eq!(polish.tone_in("Microsoft Outlook"), polish.default_tone);
     }
 }
