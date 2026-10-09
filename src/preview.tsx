@@ -90,7 +90,8 @@ const snapshot: Snapshot = {
       baseUrl: "http://localhost:11434/v1",
       model: "qwen3:8b",
       tones: [
-        { app: "Mail", tone: "formal" },
+        // Windows names apps by their file description: Outlook for Mail.
+        { app: PLATFORM === "windows" ? "Outlook" : "Mail", tone: "formal" },
         { app: "Slack", tone: "casual" },
         { app: "Notes", tone: "asSpoken" },
         { app: "VS Code", tone: "literal" },
@@ -133,7 +134,7 @@ const snapshot: Snapshot = {
 };
 
 const history: HistoryItem[] = [
-  { id: "a", createdAt: now - 60_000, app: "Mail", durationMs: 26_000, text: "Hi Mei, thanks for the notes on the release plan. We tag 0.2.0 on Thursday, once the nightly run is green.", raw: "hi mei thanks for the notes on the release plan we tag 0.2.0 on thursday once the nightly run is green", punctuated: "Hi Mei, thanks for the notes on the release plan. We tag 0.2.0 on Thursday, once the nightly run is green.", engine: { name: "sherpa-onnx-streaming-zipformer-en-2023-06-26", kind: "Streaming Zipformer", onDevice: true }, status: "inserted", error: null, recording: null, recordingPath: null, words: 21 },
+  { id: "a", createdAt: now - 60_000, app: PLATFORM === "windows" ? "Microsoft Outlook" : "Mail", durationMs: 26_000, text: "Hi Mei, thanks for the notes on the release plan. We tag 0.2.0 on Thursday, once the nightly run is green.", raw: "hi mei thanks for the notes on the release plan we tag 0.2.0 on thursday once the nightly run is green", punctuated: "Hi Mei, thanks for the notes on the release plan. We tag 0.2.0 on Thursday, once the nightly run is green.", engine: { name: "sherpa-onnx-streaming-zipformer-en-2023-06-26", kind: "Streaming Zipformer", onDevice: true }, status: "inserted", error: null, recording: null, recordingPath: null, words: 21 },
   { id: "b", createdAt: now - 3_600_000, app: "Slack", durationMs: 9_000, text: "", raw: "", punctuated: null, engine: { name: "gpt-4o-transcribe", kind: "OpenAI", onDevice: false }, status: "failed", error: "backend `openai-http` failed: connection reset", recording: null, recordingPath: null, words: 0 },
 ];
 

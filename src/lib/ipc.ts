@@ -634,6 +634,25 @@ export function appMatch(entered: string, app: string): [exact: number, words: n
   return null;
 }
 
+/** Of `entries` (app names as the user wrote them), the one that applies
+ *  in `app`: the best ranked of those that match it. */
+export function bestEntry(entries: string[], app: string): string | null {
+  let best: { rank: [number, number]; entry: string } | null = null;
+  for (const entry of entries) {
+    const rank = appMatch(entry, app);
+    if (rank && (!best || rank[0] > best.rank[0] || (rank[0] === best.rank[0] && rank[1] > best.rank[1]))) {
+      best = { rank, entry };
+    }
+  }
+  return best?.entry ?? null;
+}
+
+/** Apps seen in History that `entry` covers under another name ("Outlook"
+ *  covers "Microsoft Outlook"), where no entry in `entries` matches better. */
+export function alsoIn(entry: string, entries: string[], seen: string[]): string[] {
+  return seen.filter((app) => app.toLowerCase() !== entry.toLowerCase() && bestEntry(entries, app) === entry);
+}
+
 /** The polish tone that applies in `app`, as the backend decides it. */
 export function toneIn(polish: PolishSettings, app: string): Tone {
   let best: { rank: [number, number]; tone: Tone } | null = null;

@@ -6,6 +6,7 @@ import { btn, btnPrimary, ErrorBanner, input, Seg } from "../components/Controls
 import { Icon } from "../components/Icons";
 import {
   api,
+  appMatch,
   errorText,
   knownApps,
   MAX_WORDS,
@@ -237,7 +238,24 @@ function Editor({
 
 const COLUMNS = "grid grid-cols-[2fr_2fr_1fr_1.4fr_112px] gap-4";
 
-function Row({ entry, replacementsOnly, onEdit, onError }: { entry: DictionaryEntry; replacementsOnly: boolean; onEdit: () => void; onError: (e: string) => void }) {
+function Row({
+  entry,
+  seen,
+  replacementsOnly,
+  onEdit,
+  onError,
+}: {
+  entry: DictionaryEntry;
+  /** Apps seen in History, to say which others the word's apps cover. */
+  seen: string[];
+  replacementsOnly: boolean;
+  onEdit: () => void;
+  onError: (e: string) => void;
+}) {
+  // "Outlook" covers "Microsoft Outlook": the names other systems report.
+  const also = seen.filter(
+    (app) => !entry.apps.some((a) => a.toLowerCase() === app.toLowerCase()) && entry.apps.some((a) => appMatch(a, app)),
+  );
   return (
     <div className={`${COLUMNS} items-center border-b border-hair px-5 py-3.5 last:border-b-0`}>
       <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
@@ -254,8 +272,9 @@ function Row({ entry, replacementsOnly, onEdit, onError }: { entry: DictionaryEn
         {entry.soundsLike.length ? entry.soundsLike.join(", ") : replacementsOnly ? "Add incorrect spelling to correct" : "—"}
       </span>
       <span className="text-[13px]">{entry.boost === "strong" ? "Strong" : "Normal"}</span>
-      <span className="truncate text-[13px] text-muted" title={entry.apps.join(", ")}>
+      <span className="truncate text-[13px] text-muted" title={[...entry.apps, ...also].join(", ")}>
         {entry.apps.length ? entry.apps.join(", ") : "All apps"}
+        {also.length > 0 && <span className="text-faint"> · also {also.join(", ")}</span>}
       </span>
       <span className="flex justify-end gap-3">
         <button type="button" className="text-xs font-medium text-muted hover:text-ink" aria-label={`Edit ${entry.word}`} onClick={onEdit}>
@@ -371,7 +390,7 @@ export function DictionaryPage({ s }: { s: Snapshot }) {
           <span className="sr-only">Actions</span>
         </div>
         {shown.map((entry) => (
-          <Row key={entry.id} entry={entry} replacementsOnly={replacementsOnly} onEdit={() => setEditing(entry)} onError={setError} />
+          <Row key={entry.id} entry={entry} seen={apps} replacementsOnly={replacementsOnly} onEdit={() => setEditing(entry)} onError={setError} />
         ))}
         {shown.length === 0 && (
           <div className="flex flex-col items-center gap-1.5 px-5 py-12 text-center">
