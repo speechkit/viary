@@ -355,8 +355,13 @@ pub fn build_main(app: &AppHandle, visible: bool) -> tauri::Result<WebviewWindow
 
 /// The setup window: its title bar is drawn in the page, as the design has
 /// it. Hidden, not closed, by its close button: setup runs again next time.
-pub fn build_setup(app: &AppHandle) -> tauri::Result<WebviewWindow> {
-    WebviewWindowBuilder::new(app, "setup", WebviewUrl::default())
+/// `step` (`typing`, ...) opens it at that step.
+pub fn build_setup(app: &AppHandle, step: Option<&str>) -> tauri::Result<WebviewWindow> {
+    let url = match step {
+        Some(step) => WebviewUrl::App(format!("index.html?step={step}").into()),
+        None => WebviewUrl::default(),
+    };
+    WebviewWindowBuilder::new(app, "setup", url)
         .title("Set up Viary")
         .inner_size(1040.0, 700.0)
         .resizable(false)
@@ -401,6 +406,22 @@ pub fn show_tray_tip(app: &AppHandle) -> tauri::Result<()> {
         ));
     }
     window.show()
+}
+
+/// Opens setup at `step`, as "Allow typing…" in a notification does: the
+/// window it left off in, or a new one.
+#[cfg(target_os = "linux")]
+pub fn open_setup(app: &AppHandle, step: Option<&str>) -> tauri::Result<()> {
+    match app.get_webview_window("setup") {
+        Some(setup) => {
+            if let Some(step) = step {
+                setup.emit("setup-step", step)?;
+            }
+            setup.show()?;
+            setup.set_focus()
+        }
+        None => build_setup(app, step).map(drop),
+    }
 }
 
 pub fn build_pill(app: &AppHandle) -> tauri::Result<Option<WebviewWindow>> {

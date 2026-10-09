@@ -3,6 +3,7 @@
 // dictation. Viary runs in the tray all along; closing the window leaves
 // setup for the next launch.
 
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ErrorBanner, Switch } from "../components/Controls";
@@ -17,6 +18,16 @@ const GNOME = PLATFORM === "linux";
 const STEPS = GNOME
   ? ["Microphone", "Talk shortcut", "Typing into apps", "Voice engine", "Try it"]
   : ["Microphone access", "Talk key", "Voice engine", "Keep it in the tray", "Try it"];
+
+/** The steps by name, as Viary asks for one: `?step=typing` when it opens
+ *  the window, a `setup-step` event when it is open. */
+const STEP_IDS = GNOME
+  ? ["microphone", "shortcut", "typing", "engine", "try"]
+  : ["microphone", "key", "engine", "tray", "try"];
+
+function stepIndex(id: string | null): number {
+  return Math.max(0, id ? STEP_IDS.indexOf(id) : 0);
+}
 
 /** What the sidebar says under the steps, for each step (Windows). */
 const NOTES = [
@@ -964,7 +975,13 @@ function asksGnome(step: number, desktop: Desktop | null): boolean {
 
 export function Setup() {
   const [s] = useSnapshot();
-  const [step, setStep] = useState(0);
+  const [step, setStep] = useState(() => stepIndex(new URLSearchParams(window.location.search).get("step")));
+  useEffect(() => {
+    const unlisten = listen<string>("setup-step", (e) => setStep(stepIndex(e.payload)));
+    return () => {
+      unlisten.then((stop) => stop());
+    };
+  }, []);
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState("");
   if (!s) return null;

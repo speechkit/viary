@@ -1,11 +1,18 @@
 //! Results as GNOME notifications, where Wayland keeps the pill from
-//! floating over other windows: "Inserted" with Undo and Use raw, "Copied
-//! to clipboard", a failure with Retry. Each replaces the last one, so they
-//! do not pile up in the message tray.
+//! floating over other windows (LinuxIndicator artboard, 02 and 03):
+//!
+//! - "Inserted 13 words", with what went in, and Undo and Use raw;
+//! - "Copied to clipboard", and when Viary may not type, why, with "Allow
+//!   typing…", which opens setup at the typing step;
+//! - a failure, with Retry; a hint, transient.
+//!
+//! Each replaces the last, so they do not pile up. Undo, Use raw, and
+//! Retry act only while the dictation still offers them; when it moves on,
+//! their notification closes, so no button there silently does nothing.
 
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use ashpd::zbus::{self, MatchRule, MessageStream, message::Type, zvariant::Value};
@@ -23,44 +30,109 @@ const PATH: &str = "/org/freedesktop/Notifications";
 
 /// The notification on screen, which the next one replaces.
 static SHOWN: AtomicU32 = AtomicU32::new(0);
+/// Whether its buttons act on the current dictation.
+static ACTIONABLE: AtomicBool = AtomicBool::new(false);
 
-/// Shows `view` as a notification, if it is one the user needs to see.
-pub fn pill(view: &PillView) {
-    let (summary, body, actions): (String, String, Vec<(&str, &str)>) = match view {
-        PillView::Inserted { label, can_raw } => {
+/// A notification to show.
+#[derive(Debug, PartialEq, Eq)]
+struct Note {
+    summary: String,
+    body: String,
+    actions: Vec<(&'static str, &'static str)>,
+    /// Gone from the message tray once seen: hints.
+    transient: bool,
+    /// Its buttons act on the dictation shown, and expire with it.
+    actionable: bool,
+}
+
+/// Escapes text for a notification body, which GNOME reads as markup.
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// What `view` looks like as a notification; `None` for views the user
+/// need not be told about (while listening, GNOME shows its own
+/// microphone icon in the top bar).
+fn note(view: &PillView, can_type: bool) -> Option<Note> {
+    let note = match view {
+        PillView::Inserted { label, can_raw, text } => {
             let mut actions = vec![("undo", "Undo")];
             if *can_raw {
                 actions.push(("useRaw", "Use raw"));
             }
-            (label.clone(), String::new(), actions)
+            Note {
+                summary: if label.starts_with("Inserted") {
+                    label.clone()
+                } else {
+                    format!("Inserted {label}")
+                },
+                body: escape(text),
+                actions,
+                transient: false,
+                actionable: true,
+            }
         }
-        PillView::Copied { label, hint } => {
-            let actions = if super::permissions::can_type() {
-                vec![]
-            } else {
-                vec![("allow", "Allow typing…")]
-            };
-            (label.clone(), hint.clone(), actions)
-        }
-        PillView::Failed { message, retryable, .. } => {
-            let actions = if *retryable { vec![("retry", "Retry")] } else { vec![] };
-            (message.clone(), "The audio is kept in History.".into(), actions)
-        }
-        PillView::Hint { text } => (text.clone(), String::new(), vec![]),
-        _ => return,
+        PillView::Copied { label, .. } if !can_type => Note {
+            summary: label.clone(),
+            body: "Viary isn’t allowed to type into windows. Press Ctrl+V to paste.".into(),
+            actions: vec![("allow", "Allow typing…"), ("dismiss", "Dismiss")],
+            transient: false,
+            actionable: false,
+        },
+        PillView::Copied { label, hint } => Note {
+            summary: label.clone(),
+            body: escape(hint),
+            actions: vec![],
+            transient: false,
+            actionable: false,
+        },
+        PillView::Failed { message, retryable, .. } => Note {
+            summary: message.clone(),
+            body: "The audio is kept in History.".into(),
+            actions: if *retryable { vec![("retry", "Retry")] } else { vec![] },
+            transient: false,
+            actionable: *retryable,
+        },
+        PillView::Hint { text } => Note {
+            summary: text.clone(),
+            body: String::new(),
+            actions: vec![],
+            transient: true,
+            actionable: false,
+        },
+        _ => return None,
     };
-    let actions: Vec<(String, String)> = actions.into_iter().map(|(i, l)| (i.into(), l.into())).collect();
+    Some(note)
+}
+
+/// Shows `view` as a notification, or closes the last one when its buttons
+/// no longer act: a new dictation started, or the last one settled.
+pub fn pill(view: &PillView) {
+    let note = note(view, super::permissions::can_type());
+    let was_actionable =
+        ACTIONABLE.swap(note.as_ref().is_some_and(|n| n.actionable), Ordering::SeqCst);
+    if note.is_none() && !was_actionable {
+        return;
+    }
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = show(&summary, &body, &actions).await {
-            tracing::warn!(%error, "cannot show a notification");
+        let result = match note {
+            Some(note) => show(&note).await,
+            None => close_shown().await,
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, "cannot update the notification");
         }
     });
 }
 
-async fn show(summary: &str, body: &str, actions: &[(String, String)]) -> zbus::Result<()> {
+async fn show(note: &Note) -> zbus::Result<()> {
     let connection = super::session_bus().await?;
-    let actions: Vec<&str> = actions.iter().flat_map(|(id, label)| [id.as_str(), label.as_str()]).collect();
-    let hints: HashMap<&str, Value<'_>> = HashMap::from([("desktop-entry", Value::from("viary"))]);
+    let actions: Vec<&str> = note.actions.iter().flat_map(|(id, label)| [*id, *label]).collect();
+    let mut hints: HashMap<&str, Value<'_>> =
+        HashMap::from([("desktop-entry", Value::from("viary"))]);
+    if note.transient {
+        hints.insert("transient", Value::from(true));
+    }
     let reply = connection
         .call_method(
             Some(BUS),
@@ -70,18 +142,30 @@ async fn show(summary: &str, body: &str, actions: &[(String, String)]) -> zbus::
             &(
                 "Viary",
                 SHOWN.load(Ordering::SeqCst),
-                "audio-input-microphone-symbolic",
-                summary,
-                body,
+                "viary",
+                note.summary.as_str(),
+                note.body.as_str(),
                 actions,
                 hints,
-                5000_i32,
+                -1_i32,
             ),
         )
         .await?;
     let id: u32 = reply.body().deserialize()?;
     SHOWN.store(id, Ordering::SeqCst);
     Ok(())
+}
+
+async fn close_shown() -> zbus::Result<()> {
+    let id = SHOWN.load(Ordering::SeqCst);
+    if id == 0 {
+        return Ok(());
+    }
+    super::session_bus()
+        .await?
+        .call_method(Some(BUS), PATH, Some(BUS), "CloseNotification", &(id,))
+        .await
+        .map(drop)
 }
 
 /// Acts on the buttons of Viary's notifications, for as long as it runs.
@@ -115,9 +199,50 @@ async fn actions(app: &AppHandle) -> zbus::Result<()> {
             "undo" => state.send(Msg::Pill(PillAction::Undo)),
             "useRaw" => state.send(Msg::Pill(PillAction::UseRaw)),
             "retry" => state.send(Msg::Pill(PillAction::Retry)),
-            "allow" => ui::open_main(app, "settings"),
+            "allow" => {
+                if let Err(error) = ui::open_setup(app, Some("typing")) {
+                    tracing::warn!(%error, "cannot open setup");
+                }
+            }
+            // "dismiss": GNOME closes a notification when a button is used.
             _ => {}
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_insertion_shows_what_went_in_and_its_buttons() {
+        let view = PillView::Inserted {
+            label: "13 words".into(),
+            can_raw: true,
+            text: "Fish & <chips>".into(),
+        };
+        let note = note(&view, true).unwrap();
+        assert_eq!(note.summary, "Inserted 13 words");
+        assert_eq!(note.body, "Fish &amp; &lt;chips&gt;");
+        assert_eq!(note.actions, vec![("undo", "Undo"), ("useRaw", "Use raw")]);
+        assert!(note.actionable);
+    }
+
+    #[test]
+    fn copied_without_typing_says_why_and_offers_to_allow_it() {
+        let view = PillView::Copied {
+            label: "Copied to clipboard".into(),
+            hint: "Ctrl+V to paste".into(),
+        };
+        let blocked = note(&view, false).unwrap();
+        assert!(blocked.body.starts_with("Viary isn’t allowed to type"));
+        assert_eq!(blocked.actions[0], ("allow", "Allow typing…"));
+        assert!(note(&view, true).unwrap().actions.is_empty());
+    }
+
+    #[test]
+    fn idle_is_not_a_notification() {
+        assert!(note(&PillView::Idle, true).is_none());
+    }
 }
