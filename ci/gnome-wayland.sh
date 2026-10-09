@@ -15,14 +15,13 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$(mktemp -d)}"
 chmod 700 "$XDG_RUNTIME_DIR"
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=GNOME
-# The names GNOME Shell takes for its displays.
-export WAYLAND_DISPLAY=wayland-0
-export DISPLAY=:0
 # Services D-Bus starts on demand, the desktop portal among them, see
 # only this environment. Without XDG_CURRENT_DESKTOP the portal falls back
-# to its GTK backends, which have no GlobalShortcuts or RemoteDesktop.
+# to its GTK backends, which have no GlobalShortcuts or RemoteDesktop. The
+# display names are the ones GNOME Shell takes; they are not exported, so
+# the shell itself does not run as a nested client.
 dbus-update-activation-environment \
-  XDG_RUNTIME_DIR XDG_SESSION_TYPE XDG_CURRENT_DESKTOP WAYLAND_DISPLAY DISPLAY
+  XDG_RUNTIME_DIR XDG_SESSION_TYPE XDG_CURRENT_DESKTOP WAYLAND_DISPLAY=wayland-0 DISPLAY=:0
 
 # The extension, installed as Viary's setup window installs it.
 extensions="$HOME/.local/share/gnome-shell/extensions/$uuid"
