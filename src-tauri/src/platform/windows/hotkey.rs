@@ -289,6 +289,12 @@ fn install() -> Option<HHOOK> {
     }
 }
 
+/// Whether the user holds Ctrl, as the hook saw it: Viary's own
+/// keystrokes are not counted, as Windows' key state would count them.
+pub fn ctrl_held() -> bool {
+    HOOK.get().is_some_and(|hook| hook.held().ctrl.contains(&true))
+}
+
 /// Whether a key the hotkeys use is down, so the hook must stay as it is.
 fn keys_held() -> bool {
     HOOK.get().is_some_and(|hook| hook.held().any())

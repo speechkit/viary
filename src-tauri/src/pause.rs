@@ -29,7 +29,13 @@ pub struct Pause {
     generation: AtomicU64,
 }
 
-fn now_ms() -> u64 {
+/// How often a timed pause wakes: to end on time after the computer slept
+/// (sleeping threads do not count suspended time), and to keep the
+/// tooltip's "for 12 more minutes" current.
+const TICK: Duration = Duration::from_secs(30);
+
+/// The time now, in milliseconds since the epoch.
+pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -50,15 +56,30 @@ impl Pause {
         let until = length.map(|length| {
             now_ms().saturating_add(u64::try_from(length.as_millis()).unwrap_or(u64::MAX))
         });
-        *lock(&self.state) = Some(Paused { until });
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        if let Some(length) = length {
+        // The generation changes with the state, under its lock, so a timer
+        // left from an earlier pause cannot see its own generation with
+        // this pause in effect.
+        let generation = {
+            let mut state = lock(&self.state);
+            *state = Some(Paused { until });
+            self.generation.fetch_add(1, Ordering::SeqCst) + 1
+        };
+        if let Some(until) = until {
             let app = app.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(length);
                 let pause = &app.state::<App>().pause;
-                if pause.generation.load(Ordering::SeqCst) == generation {
-                    pause.resume(&app);
+                loop {
+                    let left = until.saturating_sub(now_ms());
+                    std::thread::sleep(Duration::from_millis(left).min(TICK));
+                    if pause.generation.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
+                    if now_ms() >= until {
+                        pause.end(&app, generation);
+                        return;
+                    }
+                    // The time left, in the tooltip and the Linux menu.
+                    ui::refresh(&app);
                 }
             });
         }
@@ -66,8 +87,23 @@ impl Pause {
     }
 
     pub fn resume(&self, app: &AppHandle) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        *lock(&self.state) = None;
+        {
+            let mut state = lock(&self.state);
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            *state = None;
+        }
+        changed(app);
+    }
+
+    /// Ends the pause `generation` started, unless another has since.
+    fn end(&self, app: &AppHandle, generation: u64) {
+        {
+            let mut state = lock(&self.state);
+            if self.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            *state = None;
+        }
         changed(app);
     }
 }

@@ -532,14 +532,31 @@ impl Controller {
     }
 
     fn paste_last(&mut self) {
+        // A dictation under way keeps the pill, and its text goes in when
+        // it ends: a paste now would land in the middle of it.
+        if matches!(
+            self.phase,
+            Phase::Listening(_) | Phase::Tapped(..) | Phase::Busy(_) | Phase::Polishing(_)
+        ) {
+            tracing::debug!("paste last: a dictation is under way");
+            return;
+        }
         let last = self.state().history.list().into_iter().find(|e| !e.text.is_empty());
         let Some(entry) = last else {
             self.hint("Nothing dictated yet");
             return;
         };
         let target = apps::frontmost().unwrap_or_default();
-        if let Delivery::Copied { label, .. } = deliver(&self.app, &entry.text, &target) {
-            self.hint(label);
+        match deliver(&self.app, &entry.text, &target) {
+            Delivery::Copied { label, .. } => self.hint(label),
+            // The pill's Undo would now take back this paste, not the
+            // insertion it shows.
+            Delivery::Pasted if matches!(self.phase, Phase::Inserted(_)) => {
+                self.next_token();
+                self.phase = Phase::Idle;
+                self.show(PillView::Idle);
+            }
+            Delivery::Pasted => {}
         }
     }
 

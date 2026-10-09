@@ -20,7 +20,7 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-use super::{app, is_wayland};
+use super::{app, gsettings, gsettings_list, gsettings_set_list, is_wayland};
 use crate::{lock, settings::Hotkey};
 
 /// What the listener reports.
@@ -226,11 +226,37 @@ pub fn bind() -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // The custom shortcut and its socket (GNOME 46)
 
-/// Where the running Viary listens for `viary --toggle`.
-fn socket_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map_or_else(std::env::temp_dir, PathBuf::from)
-        .join("viary.sock")
+/// How long a connection may take to say "toggle": the socket is read one
+/// connection at a time, so one left open must not hold up the next.
+const READ_FOR: Duration = Duration::from_millis(500);
+
+/// Where the running Viary listens for `viary --toggle`: the user's runtime
+/// directory, or else a folder of the user's own in the shared temporary
+/// one, where other users could otherwise reach or squat the socket.
+fn socket_path() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return Some(PathBuf::from(dir).join("viary.sock"));
+    }
+    private_temp_dir().map(|dir| dir.join("viary.sock"))
+}
+
+fn private_temp_dir() -> Option<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+    // /proc/self belongs to this process's user.
+    let uid = std::fs::metadata("/proc/self").ok()?.uid();
+    let dir = std::env::temp_dir().join(format!("viary-{uid}"));
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            tracing::warn!(%error, "cannot make a folder for the shortcut socket");
+            return None;
+        }
+    }
+    // Made by someone else first, or opened up since: not ours to use.
+    let meta = std::fs::symlink_metadata(&dir).ok()?;
+    (meta.is_dir() && meta.uid() == uid && meta.mode() & 0o077 == 0).then_some(dir)
 }
 
 /// `viary --toggle` handed over as a second launch, where the socket is
@@ -244,13 +270,19 @@ pub fn toggle() {
 /// `viary --toggle`: tells the running Viary, and returns whether one was
 /// there to tell. Called before the app starts.
 pub fn send_toggle() -> bool {
-    UnixStream::connect(socket_path())
+    let Some(path) = socket_path() else {
+        return false;
+    };
+    UnixStream::connect(path)
         .and_then(|mut stream| std::io::Write::write_all(&mut stream, b"toggle"))
         .is_ok()
 }
 
 fn listen_socket(listener: Arc<Listener>) {
-    let path = socket_path();
+    let Some(path) = socket_path() else {
+        tracing::warn!("no private folder for the custom shortcut's socket");
+        return;
+    };
     let _ = std::fs::remove_file(&path);
     let socket = match UnixListener::bind(&path) {
         Ok(socket) => socket,
@@ -263,6 +295,9 @@ fn listen_socket(listener: Arc<Listener>) {
         .name("viary-toggle".into())
         .spawn(move || {
             for stream in socket.incoming().flatten() {
+                if stream.set_read_timeout(Some(READ_FOR)).is_err() {
+                    continue;
+                }
                 let mut word = String::new();
                 if (&stream).take(16).read_to_string(&mut word).is_ok() && word == "toggle" {
                     (listener.on_event)(HotkeyEvent::Toggle);
@@ -281,30 +316,10 @@ fn command() -> String {
     format!("'{exe}' --toggle")
 }
 
-fn gsettings(args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("gsettings")
-        .args(args)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
-    }
-}
-
 const MEDIA_KEYS: &str = "org.gnome.settings-daemon.plugins.media-keys";
 
 fn custom_list() -> Vec<String> {
-    gsettings(&["get", MEDIA_KEYS, "custom-keybindings"])
-        .unwrap_or_default()
-        .trim_start_matches("@as")
-        .trim()
-        .trim_matches(|c| c == '[' || c == ']')
-        .split(',')
-        .map(|p| p.trim().trim_matches('\'').to_owned())
-        .filter(|p| !p.is_empty())
-        .collect()
+    gsettings_list(MEDIA_KEYS, "custom-keybindings").unwrap_or_default()
 }
 
 fn custom_bound() -> bool {
@@ -320,12 +335,7 @@ fn add_custom() -> Result<(), String> {
     if !list.iter().any(|p| p == CUSTOM) {
         list.push(CUSTOM.to_owned());
     }
-    let value = format!(
-        "[{}]",
-        list.iter().map(|p| format!("'{p}'")).collect::<Vec<_>>().join(", ")
-    );
-    gsettings(&["set", MEDIA_KEYS, "custom-keybindings", &value])?;
-    Ok(())
+    gsettings_set_list(MEDIA_KEYS, "custom-keybindings", &list)
 }
 
 #[cfg(test)]

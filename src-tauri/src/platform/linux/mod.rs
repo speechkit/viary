@@ -138,6 +138,44 @@ async fn sent_by(message: &ashpd::zbus::Message, name: &str) -> bool {
         .is_some_and(|owner| owner == sender)
 }
 
+/// Runs `gsettings` with `args`; its output, or its error.
+fn gsettings(args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("gsettings")
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+}
+
+/// A string list setting, as `gsettings get` prints it: `['a', 'b']`, or
+/// `@as []` when empty.
+fn parse_list(printed: &str) -> Vec<String> {
+    printed
+        .trim()
+        .trim_start_matches("@as")
+        .trim()
+        .trim_matches(|c| c == '[' || c == ']')
+        .split(',')
+        .map(|item| item.trim().trim_matches('\'').to_owned())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+/// Reads the string list `key` of `schema`.
+fn gsettings_list(schema: &str, key: &str) -> Result<Vec<String>, String> {
+    gsettings(&["get", schema, key]).map(|printed| parse_list(&printed))
+}
+
+/// Sets the string list `key` of `schema` to `items`.
+fn gsettings_set_list(schema: &str, key: &str, items: &[String]) -> Result<(), String> {
+    let quoted: Vec<String> = items.iter().map(|item| format!("'{item}'")).collect();
+    gsettings(&["set", schema, key, &format!("[{}]", quoted.join(", "))]).map(drop)
+}
+
 /// What the setup window and Settings show about the desktop.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -195,4 +233,16 @@ pub fn install_extension() -> Result<(), String> {
 /// Whether the shell draws the pill: Wayland, with the extension running.
 pub fn shell_pill() -> bool {
     is_wayland() && extension::active()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_gsettings_list_is_read_without_its_quotes() {
+        assert_eq!(super::parse_list("@as []"), Vec::<String>::new());
+        assert_eq!(
+            super::parse_list("['ding@rastersoft.com', 'viary@viary.app']\n"),
+            ["ding@rastersoft.com", "viary@viary.app"]
+        );
+    }
 }
