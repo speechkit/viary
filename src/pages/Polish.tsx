@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { btn, btnDanger, btnPrimary, ErrorBanner, Field, input, Select, Switch, useDraft } from "../components/Controls";
 import { Icon } from "../components/Icons";
 import {
+  alsoIn,
   api,
   errorText,
   knownApps,
@@ -307,7 +308,8 @@ function TonesCard({ s, onError }: { s: Snapshot; onError: (e: string) => void }
   const [adding, setAdding] = useState(false);
   const polish = s.settings.polish;
   const listed = polish.tones.map((t) => t.app);
-  const suggestions = knownApps(history).filter((app) => !listed.includes(app));
+  const seen = knownApps(history);
+  const suggestions = seen.filter((app) => !listed.includes(app));
   const setTone = (app: string, tone: Tone | null) => api.setAppTone(app, tone).catch((e) => onError(errorText(e)));
   const dim = !polish.enabled ? "opacity-50" : "";
   return (
@@ -334,7 +336,14 @@ function TonesCard({ s, onError }: { s: Snapshot; onError: (e: string) => void }
         {polish.tones.map(({ app, tone }) => (
           <div key={app} className="group flex items-center gap-3 border-b border-hair px-5 py-2.5">
             <AppTile app={app} />
-            <span className="min-w-0 grow truncate text-sm">{app}</span>
+            <span className="flex min-w-0 grow flex-col">
+              <span className="truncate text-sm">{app}</span>
+              {alsoIn(app, listed, seen).length > 0 && (
+                <span className="truncate text-xs text-faint" title={alsoIn(app, listed, seen).join(", ")}>
+                  Also in {alsoIn(app, listed, seen).join(", ")}
+                </span>
+              )}
+            </span>
             <Select label={`${app} tone`} value={tone} options={TONES} onChange={(t) => setTone(app, t)} />
             <button
               type="button"
