@@ -12,6 +12,7 @@ use std::{
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
@@ -73,6 +74,16 @@ struct Listener {
 
 static LISTENER: OnceLock<Arc<Listener>> = OnceLock::new();
 
+/// When GNOME last reported the shortcut released, or pressed in toggle
+/// mode, which reports no release.
+static RELEASED: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// How long ago GNOME last reported the shortcut released (or pressed, in
+/// toggle mode); `None` if it has not.
+pub fn since_release() -> Option<Duration> {
+    lock(&RELEASED).map(|at| at.elapsed())
+}
+
 pub fn status() -> Status {
     LISTENER.get().map(|l| *lock(&l.status)).unwrap_or_default()
 }
@@ -90,7 +101,12 @@ pub struct HotkeyListener;
 impl HotkeyListener {
     pub fn spawn(_hotkey: Hotkey, on_event: impl Fn(HotkeyEvent) + Send + Sync + 'static) -> Self {
         let listener = Arc::new(Listener {
-            on_event: Arc::new(on_event),
+            on_event: Arc::new(move |event: HotkeyEvent| {
+                if matches!(event, HotkeyEvent::Up | HotkeyEvent::Toggle) {
+                    *lock(&RELEASED) = Some(Instant::now());
+                }
+                on_event(event);
+            }),
             status: Mutex::default(),
             portal: tokio::sync::Mutex::new(None),
         });
@@ -215,6 +231,14 @@ fn socket_path() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map_or_else(std::env::temp_dir, PathBuf::from)
         .join("viary.sock")
+}
+
+/// `viary --toggle` handed over as a second launch, where the socket is
+/// not listening: the same as through it.
+pub fn toggle() {
+    if let Some(listener) = LISTENER.get() {
+        (listener.on_event)(HotkeyEvent::Toggle);
+    }
 }
 
 /// `viary --toggle`: tells the running Viary, and returns whether one was
