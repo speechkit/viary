@@ -96,6 +96,9 @@ pub enum PillView {
     Inserted {
         label: String,
         can_raw: bool,
+        /// What went in, for a notification to show; not sent to the pill.
+        #[serde(skip_serializing)]
+        text: String,
     },
     Copied {
         label: String,
@@ -723,6 +726,7 @@ impl Controller {
                 self.show(PillView::Inserted {
                     label,
                     can_raw: raw != text,
+                    text: text.clone(),
                 });
                 self.phase = Phase::Inserted(Inserted {
                     target: job.target,
@@ -926,6 +930,7 @@ impl Controller {
                 self.show(PillView::Inserted {
                     label: "Inserted as spoken".into(),
                     can_raw: false,
+                    text: inserted.raw.clone(),
                 });
                 self.phase = Phase::Inserted(inserted);
                 self.expire_after(INSERTED_FOR);

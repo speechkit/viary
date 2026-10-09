@@ -1194,7 +1194,7 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
     let setting_up = !cfg!(target_os = "macos") && !settings.setup_done;
     ui::build_main(&handle, first_run && !setting_up)?;
     if setting_up {
-        ui::build_setup(&handle)?;
+        ui::build_setup(&handle, None)?;
     }
 
     let tray = TrayIconBuilder::with_id(ui::TRAY_ID)
