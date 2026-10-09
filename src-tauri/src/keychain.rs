@@ -4,11 +4,24 @@
 //! an engine or polish request is built. They never go back to the web view:
 //! the UI learns only whether a key is stored.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use speechkit::Secret;
 
+use crate::lock;
+
 const SERVICE: &str = "app.viary.api-key";
+
+/// Whether each provider has a key, as last read or written here, by
+/// [`Provider`] order. Every snapshot and tray menu asks, and Credential
+/// Manager and the Secret Service answer over IPC (the Secret Service may
+/// even ask to unlock the keyring). Keys change through Viary, which
+/// updates this.
+static HAS: Mutex<[Option<bool>; 3]> = Mutex::new([None; 3]);
+
+fn remember(provider: Provider, has: bool) {
+    lock(&HAS)[provider as usize] = Some(has);
+}
 
 /// A cloud provider whose key Viary stores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -91,20 +104,29 @@ pub fn save(provider: Provider, key: &str) -> Result<(), String> {
     if key.is_empty() {
         return Err("the API key is empty".into());
     }
-    imp::set(provider.account(), key)
+    imp::set(provider.account(), key)?;
+    remember(provider, true);
+    Ok(())
 }
 
 /// The stored key, wrapped so it is never printed.
 pub fn load(provider: Provider) -> Option<Arc<Secret>> {
-    imp::get(provider.account())
-        .filter(|key| !key.trim().is_empty())
-        .map(|key| Arc::new(Secret::new(key)))
+    let key = imp::get(provider.account()).filter(|key| !key.trim().is_empty());
+    remember(provider, key.is_some());
+    key.map(|key| Arc::new(Secret::new(key)))
 }
 
 pub fn has(provider: Provider) -> bool {
-    imp::get(provider.account()).is_some_and(|key| !key.trim().is_empty())
+    if let Some(has) = lock(&HAS)[provider as usize] {
+        return has;
+    }
+    let has = imp::get(provider.account()).is_some_and(|key| !key.trim().is_empty());
+    remember(provider, has);
+    has
 }
 
 pub fn delete(provider: Provider) -> Result<(), String> {
-    imp::delete(provider.account())
+    imp::delete(provider.account())?;
+    remember(provider, false);
+    Ok(())
 }

@@ -1,6 +1,8 @@
 //! An X11 session (or XWayland, where it applies): the active window and
 //! synthetic keys through XTest.
 
+use std::time::{Duration, Instant};
+
 use x11rb::{
     connection::Connection,
     protocol::{
@@ -32,31 +34,84 @@ fn atom(conn: &RustConnection, name: &str) -> Result<u32, String> {
         .atom)
 }
 
-/// The keycode that types `keysym` in the current layout.
-fn keycode(conn: &RustConnection, keysym: u32) -> Result<Keycode, String> {
-    let setup = conn.setup();
-    let (min, max) = (setup.min_keycode, setup.max_keycode);
-    let map = conn
-        .get_keyboard_mapping(min, max - min + 1)
-        .map_err(|e| e.to_string())?
-        .reply()
-        .map_err(|e| e.to_string())?;
-    let per = usize::from(map.keysyms_per_keycode).max(1);
-    map.keysyms
-        .chunks(per)
-        .position(|syms| syms.contains(&keysym))
-        .and_then(|i| u8::try_from(i).ok())
-        .map(|i| min + i)
-        .ok_or_else(|| format!("no key types keysym {keysym:#x}"))
+/// Keysyms that would turn Ctrl+V into another shortcut while held: Shift,
+/// Alt, Super, Meta, and AltGr (ISO_Level3_Shift). The talk shortcut's Alt
+/// can still be down when its Space comes up. Ctrl is not here: Ctrl+V is
+/// still Ctrl+V.
+const IN_THE_WAY: [u32; 9] = [0xffe1, 0xffe2, 0xffe9, 0xffea, 0xffeb, 0xffec, 0xffe7, 0xffe8, 0xfe03];
+
+/// How long to wait for those keys to come up before giving up.
+const WAIT_FOR_KEYS: Duration = Duration::from_millis(1500);
+
+/// The keyboard mapping: which keysyms each keycode types.
+struct KeyMap {
+    min: Keycode,
+    per: usize,
+    keysyms: Vec<u32>,
+}
+
+impl KeyMap {
+    fn read(conn: &RustConnection) -> Result<Self, String> {
+        let setup = conn.setup();
+        let (min, max) = (setup.min_keycode, setup.max_keycode);
+        let map = conn
+            .get_keyboard_mapping(min, max - min + 1)
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?;
+        Ok(Self {
+            min,
+            per: usize::from(map.keysyms_per_keycode).max(1),
+            keysyms: map.keysyms,
+        })
+    }
+
+    /// The keycode that types `keysym` in the current layout.
+    fn code(&self, keysym: u32) -> Option<Keycode> {
+        self.keysyms
+            .chunks(self.per)
+            .position(|syms| syms.contains(&keysym))
+            .and_then(|i| u8::try_from(i).ok())
+            .map(|i| self.min + i)
+    }
+}
+
+/// Waits until none of [`IN_THE_WAY`] is held; false if one still is.
+fn keys_released(conn: &RustConnection, map: &KeyMap) -> Result<bool, String> {
+    let codes: Vec<Keycode> = IN_THE_WAY.iter().filter_map(|&k| map.code(k)).collect();
+    let deadline = Instant::now() + WAIT_FOR_KEYS;
+    loop {
+        let keys = conn
+            .query_keymap()
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?
+            .keys;
+        let held = codes
+            .iter()
+            .any(|&code| keys[usize::from(code / 8)] & (1 << (code % 8)) != 0);
+        if !held {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
 }
 
 /// Presses `keysyms` in order, then releases them in reverse: a shortcut.
+/// Waits first for keys that would change the shortcut to come up.
 pub fn press(keysyms: &[u32]) -> Result<(), String> {
     let (conn, root) = connect()?;
+    let map = KeyMap::read(&conn)?;
     let codes = keysyms
         .iter()
-        .map(|&k| keycode(&conn, k))
+        .map(|&k| map.code(k).ok_or_else(|| format!("no key types keysym {k:#x}")))
         .collect::<Result<Vec<_>, _>>()?;
+    if !keys_released(&conn, &map)? {
+        return Err("a modifier key is still held".into());
+    }
     let send = |kind: u8, code: Keycode| {
         conn.xtest_fake_input(kind, code, x11rb::CURRENT_TIME, root, 0, 0, 0)
             .map(drop)

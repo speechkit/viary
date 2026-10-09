@@ -2,6 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCallback, useEffect, useState } from "react";
 import type { Platform } from "./platform";
 
@@ -492,11 +493,25 @@ export function useMicLevel(microphone: string | null): { level: number; error: 
   const [level, setLevel] = useState(0);
   const [error, setError] = useState("");
   useEffect(() => {
-    setError("");
-    api.micTest(true).catch((e) => setError(errorText(e)));
+    const start = () => {
+      setError("");
+      api.micTest(true).catch((e) => setError(errorText(e)));
+    };
+    start();
     const unlisten = listen<number>("mic-level", (e) => setLevel(e.payload));
+    // A hidden window keeps its page: the microphone is let go while the
+    // window is closed or left, and taken again when it comes back.
+    const unlistenFocus = getCurrentWebviewWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused) {
+        start();
+      } else {
+        api.micTest(false).catch(() => {});
+        setLevel(0);
+      }
+    });
     return () => {
       unlisten.then((stop) => stop());
+      unlistenFocus.then((stop) => stop());
       api.micTest(false).catch(() => {});
     };
   }, [microphone]);

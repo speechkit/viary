@@ -739,8 +739,7 @@ fn set_key_test(state: State<'_, App>, on: bool) {
 /// Setup ran to its end: it does not open again.
 #[tauri::command]
 fn finish_setup(app: AppHandle, state: State<'_, App>) {
-    state.key_test.store(false, Ordering::SeqCst);
-    mic_test::stop();
+    ui::end_setup_tests(&app);
     let before = state.settings();
     state.change(|s| {
         s.setup_done = true;

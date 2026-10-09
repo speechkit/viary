@@ -3,8 +3,9 @@
 // over D-Bus to paste (Ctrl+V), undo (Ctrl+Z), learn which app has focus,
 // and show its dictation pill, whose buttons come back as a signal.
 //
-// Only those two fixed shortcuts can be typed through it, never arbitrary
-// text, so other programs on the session bus gain little from it.
+// Only Viary may call it: the client that owns VIARY_NAME on the session
+// bus. Other programs get AccessDenied, so the shell's keyboard and focus,
+// which Wayland keeps from apps, stay out of their reach.
 
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
@@ -17,8 +18,19 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const BUS_NAME = 'app.viary.Shell';
 const OBJECT_PATH = '/app/viary/Shell';
+/** The name Viary's own connection owns: its calls are the ones answered. */
+const VIARY_NAME = 'app.viary.App';
 /** Bumped when the interface changes, so Viary can ask for an update. */
-const VERSION = 1;
+const VERSION = 2;
+
+/** Keys that would turn Ctrl+V into another shortcut while held: the talk
+ *  shortcut's Alt can still be down when its Space comes up. Ctrl is not
+ *  here: Ctrl+V is still Ctrl+V. */
+const IN_THE_WAY = Clutter.ModifierType.SHIFT_MASK | Clutter.ModifierType.MOD1_MASK |
+    Clutter.ModifierType.MOD4_MASK | Clutter.ModifierType.MOD5_MASK |
+    Clutter.ModifierType.SUPER_MASK | Clutter.ModifierType.META_MASK;
+/** How long to wait for those keys to come up, in ms. */
+const WAIT_FOR_KEYS = 1500;
 
 const INTERFACE = `
 <node>
@@ -244,9 +256,22 @@ export default class ViaryExtension extends Extension {
         this._dbus = Gio.DBusExportedObject.wrapJSObject(INTERFACE, this);
         this._dbus.export(Gio.DBus.session, OBJECT_PATH);
         this._name = Gio.bus_own_name(Gio.BusType.SESSION, BUS_NAME, Gio.BusNameOwnerFlags.NONE, null, null, null);
+        this._viary = null;
+        this._watch = Gio.bus_watch_name(Gio.BusType.SESSION, VIARY_NAME, Gio.BusNameWatcherFlags.NONE,
+            (_connection, _name, owner) => {
+                this._viary = owner;
+            },
+            () => {
+                this._viary = null;
+            });
     }
 
     disable() {
+        if (this._watch) {
+            Gio.bus_unwatch_name(this._watch);
+            this._watch = 0;
+        }
+        this._viary = null;
         if (this._name) {
             Gio.bus_unown_name(this._name);
             this._name = 0;
@@ -263,6 +288,15 @@ export default class ViaryExtension extends Extension {
         return VERSION;
     }
 
+    /** Whether `invocation` comes from Viary; answers AccessDenied if not. */
+    _fromViary(invocation) {
+        if (this._viary && invocation.get_sender() === this._viary)
+            return true;
+        invocation.return_dbus_error('org.freedesktop.DBus.Error.AccessDenied',
+            `Only the client that owns ${VIARY_NAME} may call this`);
+        return false;
+    }
+
     /** Presses `keyvals` in order, then releases them in reverse. */
     _press(keyvals) {
         const time = GLib.get_monotonic_time();
@@ -272,35 +306,76 @@ export default class ViaryExtension extends Extension {
             this._keyboard.notify_keyval(time, keyval, Clutter.KeyState.RELEASED);
     }
 
-    Paste() {
-        this._press([Clutter.KEY_Control_L, Clutter.KEY_v]);
+    /** Presses `keyvals` once none of IN_THE_WAY is held, then answers;
+     *  an error if one still is after WAIT_FOR_KEYS. */
+    _pressWhenReleased(keyvals, invocation) {
+        const deadline = GLib.get_monotonic_time() + WAIT_FOR_KEYS * 1000;
+        const attempt = () => {
+            if (!this._keyboard) {
+                invocation.return_dbus_error('app.viary.Shell.Error.Disabled', 'The extension was turned off');
+                return GLib.SOURCE_REMOVE;
+            }
+            const [, , mods] = global.get_pointer();
+            if (mods & IN_THE_WAY) {
+                if (GLib.get_monotonic_time() < deadline)
+                    return GLib.SOURCE_CONTINUE;
+                invocation.return_dbus_error('app.viary.Shell.Error.KeyHeld', 'A modifier key is still held');
+                return GLib.SOURCE_REMOVE;
+            }
+            this._press(keyvals);
+            invocation.return_value(null);
+            return GLib.SOURCE_REMOVE;
+        };
+        if (attempt() === GLib.SOURCE_CONTINUE)
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 15, attempt);
     }
 
-    Undo() {
-        this._press([Clutter.KEY_Control_L, Clutter.KEY_z]);
+    // Each method is the `Async` form, which gets the invocation and so
+    // its sender.
+
+    PasteAsync(_params, invocation) {
+        if (this._fromViary(invocation))
+            this._pressWhenReleased([Clutter.KEY_Control_L, Clutter.KEY_v], invocation);
     }
 
-    FocusedApp() {
+    UndoAsync(_params, invocation) {
+        if (this._fromViary(invocation))
+            this._pressWhenReleased([Clutter.KEY_Control_L, Clutter.KEY_z], invocation);
+    }
+
+    FocusedAppAsync(_params, invocation) {
+        if (!this._fromViary(invocation))
+            return;
         const window = global.display.focus_window;
-        if (!window)
-            return [0, ''];
-        const app = Shell.WindowTracker.get_default().get_window_app(window);
-        return [window.get_pid(), app?.get_name() ?? window.get_wm_class() ?? ''];
+        const app = window ? Shell.WindowTracker.get_default().get_window_app(window) : null;
+        const focused = window
+            ? [window.get_pid(), app?.get_name() ?? window.get_wm_class() ?? '']
+            : [0, ''];
+        invocation.return_value(new GLib.Variant('(is)', focused));
     }
 
-    ShowPill(view) {
+    ShowPillAsync([view], invocation) {
+        if (!this._fromViary(invocation))
+            return;
         try {
             this._pill.show(JSON.parse(view));
         } catch (error) {
             logError(error, 'Viary: cannot show the pill');
         }
+        invocation.return_value(null);
     }
 
-    SetLevel(level) {
+    SetLevelAsync([level], invocation) {
+        if (!this._fromViary(invocation))
+            return;
         this._pill.level(level);
+        invocation.return_value(null);
     }
 
-    SetPartial(token, text) {
+    SetPartialAsync([token, text], invocation) {
+        if (!this._fromViary(invocation))
+            return;
         this._pill.partial(Number(token), text);
+        invocation.return_value(null);
     }
 }

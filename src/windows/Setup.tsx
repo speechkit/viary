@@ -64,6 +64,14 @@ function Key({ children, dark = false }: { children: React.ReactNode; dark?: boo
   );
 }
 
+/** Hides setup, which runs again next time. Its page stays loaded, so the
+ *  key and microphone tests are ended here rather than on unmount. */
+function closeSetup() {
+  api.setKeyTest(false).catch(() => {});
+  api.micTest(false).catch(() => {});
+  getCurrentWebviewWindow().hide();
+}
+
 function TitleBar() {
   const window = getCurrentWebviewWindow();
   const caption = "flex h-9 w-[46px] items-center justify-center text-ink hover:bg-ink/8";
@@ -78,7 +86,7 @@ function TitleBar() {
       <button type="button" aria-label="Minimize" className={caption} onClick={() => window.minimize()}>
         <Icon name="minus" size={14} />
       </button>
-      <button type="button" aria-label="Close" className={caption + " hover:bg-[#C42B1C] hover:text-white"} onClick={() => window.hide()}>
+      <button type="button" aria-label="Close" className={caption + " hover:bg-[#C42B1C] hover:text-white"} onClick={closeSetup}>
         <Icon name="close" size={14} />
       </button>
     </div>
@@ -95,7 +103,7 @@ function HeaderBar() {
       <button
         type="button"
         aria-label="Close"
-        onClick={() => getCurrentWebviewWindow().hide()}
+        onClick={closeSetup}
         className="flex size-6 items-center justify-center rounded-full bg-black/8 hover:bg-black/12"
       >
         <Icon name="close" size={12} strokeWidth={2.2} />
@@ -351,7 +359,13 @@ const KEYS: { key: Hotkey; caps: string[]; label: string; note: string }[] = [
 export function KeyTest({ name, toggle = false }: { name: string; toggle?: boolean }) {
   useEffect(() => {
     api.setKeyTest(true);
+    // A hidden window keeps its page: the test follows the window's focus,
+    // so the key goes back to dictating once the window is closed or left.
+    const unlisten = getCurrentWebviewWindow().onFocusChanged(({ payload: focused }) => {
+      api.setKeyTest(focused);
+    });
     return () => {
+      unlisten.then((stop) => stop());
       api.setKeyTest(false);
     };
   }, []);
