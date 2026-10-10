@@ -35,14 +35,6 @@ mod desktop {
         serde_json::Value::Null
     }
 
-    pub fn bind_shortcut() -> Result<(), String> {
-        Err("this system has no talk shortcut to bind".into())
-    }
-
-    pub fn set_typing(_method: &str) -> Result<(), String> {
-        Err("this system has one way to type".into())
-    }
-
     pub fn install_extension() -> Result<(), String> {
         Err("GNOME Shell extensions are for Linux".into())
     }
@@ -65,15 +57,6 @@ pub fn keyboard() -> Option<Keyboard> {
         alt_gr: windows::layout_has_altgr(),
     });
     #[cfg(not(target_os = "windows"))]
-    None
-}
-
-/// The talk key's name where the desktop, not Viary, decides the keys:
-/// GNOME's shortcut, which the user can change in GNOME Settings.
-pub fn hotkey_label() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    return hotkey::trigger();
-    #[cfg(not(target_os = "linux"))]
     None
 }
 

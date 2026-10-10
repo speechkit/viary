@@ -108,8 +108,9 @@ const snapshot: Snapshot = {
   },
   keys: { openAi: true, dashScope: false, customPolish: false },
   permissions: { accessibility: true, inputMonitoring: true },
-  // On GNOME, the shortcut is live once GNOME hands it over; ?bound=1 starts there.
-  hotkeyActive: PLATFORM !== "linux" || params.get("bound") === "1",
+  // On GNOME Wayland, the shortcut is live once Viary's extension runs:
+  // ?ext=active.
+  hotkeyActive: PLATFORM !== "linux" || params.get("ext") === "active",
   hotkeyName: HOTKEYS[PLATFORM].name,
   pill: { kind: "idle" },
   paused: null,
@@ -120,9 +121,6 @@ const snapshot: Snapshot = {
     PLATFORM === "linux"
       ? {
           session: "wayland",
-          shortcut: { mode: params.get("gnome") === "46" ? "toggle" : "hold", bound: params.get("bound") === "1" },
-          typing: "clipboard",
-          portalAllowed: false,
           // ?ext=installed, active or updated: the extension's other states.
           extension: (params.get("ext") as "installed" | "active" | "updated" | null) ?? "missing",
         }
@@ -561,20 +559,6 @@ mockIPC(
     }
     if (cmd === "resume_dictation") {
       snapshot.paused = null;
-      changed();
-      return null;
-    }
-    if (cmd === "bind_shortcut" && snapshot.desktop) {
-      await new Promise((r) => setTimeout(r, 600));
-      snapshot.desktop.shortcut.bound = true;
-      snapshot.hotkeyActive = true;
-      changed();
-      return null;
-    }
-    if (cmd === "set_typing" && snapshot.desktop) {
-      await new Promise((r) => setTimeout(r, 400));
-      snapshot.desktop.typing = a.method as "extension" | "portal" | "clipboard";
-      if (a.method === "portal") snapshot.desktop.portalAllowed = true;
       changed();
       return null;
     }

@@ -109,6 +109,5 @@ impl Pause {
 }
 
 fn changed(app: &AppHandle) {
-    ui::redraw_tray(app);
     ui::refresh(app);
 }

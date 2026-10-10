@@ -375,10 +375,7 @@ export function HistoryPage({ s, focus }: { s: Snapshot; focus: string | null })
         <Detail key={current.id} item={current} s={s} />
       ) : (
         <main className="flex grow items-center justify-center text-sm text-muted">
-          {/* GNOME 46 reports presses only: there the shortcut is a toggle. */}
-          {s.desktop?.shortcut.mode === "toggle"
-            ? `Press ${s.hotkeyName}, speak, and press it again to make your first dictation.`
-            : `Hold ${s.hotkeyName} and speak to make your first dictation.`}
+          {`Hold ${s.hotkeyName} and speak to make your first dictation.`}
         </main>
       )}
     </div>

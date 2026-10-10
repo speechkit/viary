@@ -96,7 +96,7 @@ fn content(app: &AppHandle) -> Content {
             .map(str::to_owned),
     );
     Content {
-        key: dictation::hotkey_name(settings.hotkey),
+        key: dictation::key_name(settings.hotkey).to_owned(),
         status,
         polish: settings.polish.enabled,
         translate: settings.polish.translate,

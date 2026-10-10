@@ -2,41 +2,34 @@
 
 use serde::Serialize;
 
-use super::{Typing, extension, is_wayland, prefs};
+use super::{extension, is_wayland};
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Permissions {
     /// Viary can type into other apps.
     pub accessibility: bool,
-    /// GNOME hands the talk shortcut to Viary.
+    /// Viary hears the talk shortcut.
     pub input_monitoring: bool,
 }
 
 pub fn check() -> Permissions {
     Permissions {
         accessibility: can_type(),
-        input_monitoring: super::hotkey::status().bound,
+        input_monitoring: super::hotkey::bound(),
     }
 }
 
-/// Whether Viary can send Ctrl+V: always on X11; on Wayland, once the user
-/// chose the portal and GNOME allowed it.
+/// Whether Viary can send Ctrl+V: always on X11; on Wayland, while its
+/// GNOME Shell extension runs.
 pub fn can_type() -> bool {
-    !is_wayland() || {
-        let prefs = prefs();
-        match prefs.typing {
-            Typing::Extension => extension::active(),
-            Typing::Portal => prefs.restore_token.is_some(),
-            Typing::Clipboard => false,
-        }
-    }
+    !is_wayland() || extension::active()
 }
 
 /// What to do when [`can_type`] is false.
 pub const ALLOW_TYPING: &str = "Ctrl+V to paste";
 
-/// GNOME asks through its own dialogs, from the setup window.
+/// Nothing to ask GNOME for: the setup window installs the extension.
 pub fn request(_kind: &str) {}
 
 /// Opens GNOME Settings at `kind`'s page.
@@ -44,7 +37,6 @@ pub fn open_settings(kind: &str) {
     let panel = match kind {
         // Input device and volume.
         "microphone" => "sound",
-        "inputMonitoring" => "keyboard",
         _ => return,
     };
     if let Err(error) = std::process::Command::new("gnome-control-center").arg(panel).spawn() {
@@ -54,5 +46,8 @@ pub fn open_settings(kind: &str) {
 
 /// What is missing for dictation, for the indicator, if anything.
 pub fn missing(hotkey_active: bool) -> Option<&'static str> {
-    (!hotkey_active).then_some("set up the talk shortcut")
+    if is_wayland() && !extension::active() {
+        return Some("turn on Viary's GNOME Shell extension");
+    }
+    (!hotkey_active).then_some("another app holds Ctrl+Alt+Space")
 }

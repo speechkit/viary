@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Icon, Kbd } from "../components/Icons";
-import { api, useHistory, type Snapshot } from "../lib/ipc";
+import { api, shortcutTrouble, useHistory, type Snapshot } from "../lib/ipc";
 import { isMac, PLATFORM, SYSTEM_SETTINGS, THIS_COMPUTER } from "../lib/platform";
 
 /** An average typing speed, for the time saved; Viary does not measure yours. */
@@ -91,7 +91,7 @@ export function HomePage({ s, go }: { s: Snapshot; go: Go }) {
   const wpm = seconds > 5 ? Math.round(words / (seconds / 60)) : null;
   const saved = Math.max(0, Math.round(words / TYPING_WPM - seconds / 60));
   // Windows needs nothing but the microphone switch; Linux, the talk
-  // shortcut from GNOME (typing can rightly be left to the clipboard);
+  // shortcut (on Wayland, heard by Viary's extension, which also types);
   // macOS, the key watched and permission to type.
   const allowed =
     PLATFORM === "windows"
@@ -121,16 +121,10 @@ export function HomePage({ s, go }: { s: Snapshot; go: Go }) {
         {!s.hotkeyActive && (
           <div role="alert" className="flex items-center gap-4 border-b border-hair bg-sand px-6 py-3">
             <span className="grow text-[13px]">
-              {PLATFORM === "linux"
-                ? `${s.hotkeyName} does nothing right now: GNOME has not handed it to Viary.`
-                : `${s.hotkeyName} does nothing right now.`}
+              {`${s.hotkeyName} does nothing right now.`} {shortcutTrouble(s)}
             </span>
-            <button
-              type="button"
-              className={btn}
-              onClick={() => (PLATFORM === "linux" ? api.bindShortcut().catch(() => go("settings")) : go("settings"))}
-            >
-              {PLATFORM === "linux" ? "Ask GNOME…" : "Settings"}
+            <button type="button" className={btn} onClick={() => go("settings")}>
+              Settings
             </button>
           </div>
         )}
@@ -172,8 +166,8 @@ export function HomePage({ s, go }: { s: Snapshot; go: Go }) {
           ) : PLATFORM === "linux" ? (
             <Step
               done={s.hotkeyActive}
-              title={`Let GNOME hand ${s.hotkeyName} to Viary`}
-              text="The talk shortcut, and how Viary types into apps, are in Settings."
+              title={`Let Viary hear ${s.hotkeyName}`}
+              text={shortcutTrouble(s) ?? "Viary hears the talk shortcut and types into apps."}
               action={
                 <button type="button" className={btn} onClick={() => go("settings")}>
                   Settings

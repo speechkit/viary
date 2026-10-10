@@ -97,9 +97,6 @@ pub enum PillView {
     Inserted {
         label: String,
         can_raw: bool,
-        /// What went in, for a notification to show; not sent to the pill.
-        #[serde(skip_serializing)]
-        text: String,
     },
     Copied {
         label: String,
@@ -178,10 +175,6 @@ pub enum Msg {
     /// Type the newest dictation into the app in front again.
     #[cfg_attr(target_os = "macos", expect(dead_code, reason = "macOS has no tray menu"))]
     PasteLast,
-    /// A shortcut that reports presses only (GNOME 46): start hands-free,
-    /// or stop and insert.
-    #[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "only GNOME has toggle shortcuts"))]
-    Toggle,
 }
 
 /// A recognition result.
@@ -312,7 +305,7 @@ impl Controller {
                 Msg::Tapped(token) if token == self.token => {
                     // No second tap: drop the recording and say how to dictate.
                     if matches!(self.phase, Phase::Tapped(..)) {
-                        let key = hotkey_name(self.settings().hotkey);
+                        let key = key_name(self.settings().hotkey);
                         self.hint(format!("Hold {key} to dictate, or double-tap it"));
                     }
                 }
@@ -329,13 +322,6 @@ impl Controller {
                 }
                 Msg::StartHandsFree => self.start_hands_free(),
                 Msg::PasteLast => self.paste_last(),
-                Msg::Toggle => {
-                    if matches!(&self.phase, Phase::Listening(l) if l.hands_free) {
-                        self.key_down(Instant::now());
-                    } else {
-                        self.start_hands_free();
-                    }
-                }
                 Msg::Expire(token) if token == self.token => {
                     if matches!(self.phase, Phase::Inserted(_) | Phase::Notice) {
                         self.phase = Phase::Idle;
@@ -750,7 +736,6 @@ impl Controller {
                 self.show(PillView::Inserted {
                     label,
                     can_raw: raw != text,
-                    text: text.clone(),
                 });
                 self.phase = Phase::Inserted(Inserted {
                     target: job.target,
@@ -954,7 +939,6 @@ impl Controller {
                 self.show(PillView::Inserted {
                     label: "Inserted as spoken".into(),
                     can_raw: false,
-                    text: inserted.raw.clone(),
                 });
                 self.phase = Phase::Inserted(inserted);
                 self.expire_after(INSERTED_FOR);
@@ -1245,12 +1229,6 @@ pub fn engine_name(settings: &Settings, id: &str) -> String {
             .and_then(|local| settings.local(local))
             .map_or_else(|| "on-device".into(), |m| m.name.clone()),
     }
-}
-
-/// The talk key's name as the user knows it: GNOME's shortcut as they set
-/// it, or [`key_name`].
-pub fn hotkey_name(hotkey: Hotkey) -> String {
-    platform::hotkey_label().unwrap_or_else(|| key_name(hotkey).to_owned())
 }
 
 pub fn key_name(hotkey: Hotkey) -> &'static str {

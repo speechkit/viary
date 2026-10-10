@@ -3,8 +3,9 @@
 
 use std::{
     sync::{
-        Mutex,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        Mutex, OnceLock,
+        atomic::{AtomicU8, Ordering},
+        mpsc,
     },
     time::{Duration, Instant},
 };
@@ -104,39 +105,16 @@ pub fn refresh(app: &AppHandle) {
     let _ = app.emit("state-changed", ());
     // An engine loading, a permission granted: the icon may change too,
     // and on Linux the menu, which GNOME shows without asking first.
-    queue_tray(app);
+    update_tray(app);
 }
-
-/// Brings the icon and, on Linux, the menu up to date: on a thread of its
-/// own, so no caller's lock is held while they read the state, and once
-/// for a burst of changes.
-fn queue_tray(app: &AppHandle) {
-    if !TRAY_PENDING.swap(true, Ordering::SeqCst) {
-        let app = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(50));
-            // Cleared before reading, so a change from here on queues
-            // another update.
-            TRAY_PENDING.store(false, Ordering::SeqCst);
-            redraw_tray(&app);
-            #[cfg(target_os = "linux")]
-            crate::tray_menu::refresh(&app);
-        });
-    }
-}
-
-/// Whether a tray update is queued by [`refresh`].
-static TRAY_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub fn show_pill(app: &AppHandle, view: &PillView) {
     app.state::<App>().set_pill(view.clone());
-    // Wayland has no pill window: the shell draws it when Viary's
-    // extension runs; otherwise results come as notifications.
+    // Wayland has no pill window: the shell draws it, through Viary's
+    // extension.
     #[cfg(target_os = "linux")]
     if crate::platform::shell_pill() {
         crate::platform::extension::show_pill(view);
-    } else if crate::platform::is_wayland() {
-        crate::platform::notify::pill(view);
     }
     if let Some(pill) = app.get_webview_window("pill") {
         let _ = pill.set_ignore_cursor_events(!view.interactive());
@@ -196,8 +174,6 @@ const TEMPLATE: bool = cfg!(target_os = "macos");
 
 /// The state the dictation last reported.
 static DICTATION: AtomicU8 = AtomicU8::new(TrayState::Idle as u8);
-/// The state and tooltip the icon shows, so it is drawn only on a change.
-static SHOWN: Mutex<Option<(TrayState, String)>> = Mutex::new(None);
 
 /// What the icon shows while the dictation is `dictation`: the dictation
 /// first, then a pause, the engine loading, and anything missing.
@@ -265,7 +241,7 @@ fn paused_for(left_ms: u64) -> String {
 fn status_text(app: &AppHandle, state: TrayState, attention: Option<&str>) -> String {
     let viary = app.state::<App>();
     match state {
-        TrayState::Idle => format!("hold {}", crate::dictation::hotkey_name(viary.settings().hotkey)),
+        TrayState::Idle => format!("hold {}", crate::dictation::key_name(viary.settings().hotkey)),
         TrayState::Listening => "listening".into(),
         TrayState::Transcribing => "transcribing".into(),
         TrayState::Polishing => "polishing".into(),
@@ -311,74 +287,78 @@ pub fn tray_status(app: &AppHandle) -> (TrayState, String) {
 /// The tray icon for the dictation's `state`.
 pub fn set_tray(app: &AppHandle, state: TrayState) {
     DICTATION.store(state as u8, Ordering::SeqCst);
-    redraw_tray(app);
-    // The menu's first line says the state on Linux: "Listening".
-    if cfg!(target_os = "linux") {
-        queue_tray(app);
+    update_tray(app);
+}
+
+/// How long the shell is given to read an icon before the next one.
+const ICON_SETTLES: Duration = Duration::from_millis(500);
+
+/// Asks the tray thread to bring the icon, its tooltip, and on Linux the
+/// menu up to date.
+fn update_tray(app: &AppHandle) {
+    static WAKE: OnceLock<mpsc::Sender<()>> = OnceLock::new();
+    let wake = WAKE.get_or_init(|| {
+        let (wake, wakes) = mpsc::channel();
+        let app = app.clone();
+        let spawned = std::thread::Builder::new()
+            .name("viary-tray".into())
+            .spawn(move || draw_tray_on_wake(&app, &wakes));
+        if let Err(error) = spawned {
+            tracing::error!(%error, "cannot start the tray thread");
+        }
+        wake
+    });
+    let _ = wake.send(());
+}
+
+/// Draws the tray when woken: on a thread of its own, so no caller's lock
+/// is held while it reads the state, and once for a burst of changes.
+fn draw_tray_on_wake(app: &AppHandle, wakes: &mpsc::Receiver<()>) {
+    let mut shown = None;
+    while wakes.recv().is_ok() {
+        while wakes.try_recv().is_ok() {}
+        // On Linux each icon is written to a new file and the last one
+        // deleted at once: GNOME, reading it a moment later, finds it gone
+        // or half there and keeps the old icon, as at startup, where the
+        // state changes several times in a second. The next icon waits.
+        if draw_tray(app, &mut shown) && cfg!(target_os = "linux") {
+            std::thread::sleep(ICON_SETTLES);
+        }
+        #[cfg(target_os = "linux")]
+        crate::tray_menu::refresh(app);
     }
 }
 
-/// Draws the icon and its tooltip again if what they show changed.
-pub fn redraw_tray(app: &AppHandle) {
+/// Draws the icon and its tooltip if what they show differs from `shown`,
+/// the state and tooltip last drawn; true if a new icon was set.
+fn draw_tray(app: &AppHandle, shown: &mut Option<(TrayState, String)>) -> bool {
     // Before the icon exists there is nothing to draw, and nothing to
     // remember as drawn.
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
-        return;
+        return false;
     };
-    if cfg!(target_os = "linux") && icon_settling(app) {
-        return;
-    }
     let (state, text) = tray_status(app);
+    if shown.as_ref().is_some_and(|(s, t)| *s == state && *t == text) {
+        return false;
+    }
     let dark = dark_tray();
-    let drawn = {
-        let mut shown = crate::lock(&SHOWN);
-        if shown.as_ref().is_some_and(|(s, t)| *s == state && *t == text) {
-            return;
-        }
-        shown.replace((state, text.clone()))
-    };
+    let drawn = shown.replace((state, text.clone()));
     let Look { ink, badge, struck, template } = look(state, dark);
     // Linux shows no tooltip, and each icon is a file the shell reads:
     // only a new look is written.
     let same_look = drawn.is_some_and(|(drawn, _)| look(drawn, dark) == look(state, dark));
-    if !(cfg!(target_os = "linux") && same_look) {
+    let set_icon = !(cfg!(target_os = "linux") && same_look);
+    if set_icon {
         let size = 44;
         let _ = tray.set_icon(Some(Image::new_owned(
             icons::tray(size, ink, badge, struck),
             size,
             size,
         )));
-        *crate::lock(&ICON_SET) = Some(Instant::now());
     }
     let _ = tray.set_icon_as_template(template);
     let _ = tray.set_tooltip(Some(format!("Viary: {text}")));
-}
-
-/// When the tray icon was last replaced.
-static ICON_SET: Mutex<Option<Instant>> = Mutex::new(None);
-/// How long the shell is given to read an icon before the next one.
-const ICON_SETTLES: Duration = Duration::from_millis(500);
-
-/// Whether the icon set moments ago is still to be read, so a new one
-/// waits; a redraw is queued for when it has been. On Linux each icon is
-/// written to a new file and the last one deleted at once: GNOME, reading
-/// it a moment later, finds it gone or half there and keeps the old icon,
-/// as at startup, where the state changes several times in a second.
-fn icon_settling(app: &AppHandle) -> bool {
-    static QUEUED: AtomicBool = AtomicBool::new(false);
-    let wait = crate::lock(&ICON_SET).map_or(Duration::ZERO, |at| ICON_SETTLES.saturating_sub(at.elapsed()));
-    if wait.is_zero() {
-        return false;
-    }
-    if !QUEUED.swap(true, Ordering::SeqCst) {
-        let app = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(wait);
-            QUEUED.store(false, Ordering::SeqCst);
-            redraw_tray(&app);
-        });
-    }
-    true
+    set_icon
 }
 
 pub fn tray_icon() -> Image<'static> {
@@ -413,13 +393,8 @@ pub fn build_main(app: &AppHandle, visible: bool) -> tauri::Result<WebviewWindow
 
 /// The setup window: its title bar is drawn in the page, as the design has
 /// it. Hidden, not closed, by its close button: setup runs again next time.
-/// `step` (`typing`, ...) opens it at that step.
-pub fn build_setup(app: &AppHandle, step: Option<&str>) -> tauri::Result<WebviewWindow> {
-    let url = match step {
-        Some(step) => WebviewUrl::App(format!("index.html?step={step}").into()),
-        None => WebviewUrl::default(),
-    };
-    let window = WebviewWindowBuilder::new(app, "setup", url)
+pub fn build_setup(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    let window = WebviewWindowBuilder::new(app, "setup", WebviewUrl::default())
         .title("Set up Viary")
         .inner_size(1040.0, 700.0)
         .resizable(false)
@@ -481,22 +456,6 @@ pub fn show_tray_tip(app: &AppHandle) -> tauri::Result<()> {
         ));
     }
     window.show()
-}
-
-/// Opens setup at `step`, as "Allow typing…" in a notification does: the
-/// window it left off in, or a new one.
-#[cfg(target_os = "linux")]
-pub fn open_setup(app: &AppHandle, step: Option<&str>) -> tauri::Result<()> {
-    match app.get_webview_window("setup") {
-        Some(setup) => {
-            if let Some(step) = step {
-                setup.emit("setup-step", step)?;
-            }
-            setup.show()?;
-            setup.set_focus()
-        }
-        None => build_setup(app, step).map(drop),
-    }
 }
 
 pub fn build_pill(app: &AppHandle) -> tauri::Result<Option<WebviewWindow>> {
