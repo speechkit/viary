@@ -189,7 +189,7 @@ struct Snapshot {
     keys: Keys,
     permissions: permissions::Permissions,
     hotkey_active: bool,
-    hotkey_name: String,
+    hotkey_name: &'static str,
     pill: PillView,
     /// Dictation paused from the tray.
     paused: Option<pause::Paused>,
@@ -222,7 +222,7 @@ fn get_state(app: AppHandle, state: State<'_, App>) -> Snapshot {
         },
         permissions: permissions::check(),
         hotkey_active: state.hotkey.get().is_some_and(HotkeyListener::is_active),
-        hotkey_name: dictation::hotkey_name(settings.hotkey),
+        hotkey_name: dictation::key_name(settings.hotkey),
         pill: lock(&state.pill).clone(),
         paused: state.pause.get(),
         desktop: platform::desktop(),
@@ -706,16 +706,6 @@ fn set_autostart(app: AppHandle, on: bool) -> CmdResult<()> {
     Ok(())
 }
 
-/// Asks GNOME for the talk shortcut (Linux).
-#[tauri::command]
-async fn bind_shortcut(app: AppHandle) -> CmdResult<()> {
-    let bound = tauri::async_runtime::spawn_blocking(platform::bind_shortcut)
-        .await
-        .map_err(err)?;
-    ui::refresh(&app);
-    bound
-}
-
 /// Installs Viary's GNOME Shell extension (Linux).
 #[tauri::command]
 async fn install_extension(app: AppHandle) -> CmdResult<()> {
@@ -724,17 +714,6 @@ async fn install_extension(app: AppHandle) -> CmdResult<()> {
         .map_err(err)?;
     ui::refresh(&app);
     installed
-}
-
-/// Chooses how Viary types on Wayland: `extension`, `portal`, or
-/// `clipboard` (Linux).
-#[tauri::command]
-async fn set_typing(app: AppHandle, method: String) -> CmdResult<()> {
-    let set = tauri::async_runtime::spawn_blocking(move || platform::set_typing(&method))
-        .await
-        .map_err(err)?;
-    ui::refresh(&app);
-    set
 }
 
 #[tauri::command]
@@ -1209,7 +1188,7 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
     let setting_up = !cfg!(target_os = "macos") && !settings.setup_done;
     ui::build_main(&handle, first_run && !setting_up)?;
     if setting_up {
-        ui::build_setup(&handle, None)?;
+        ui::build_setup(&handle)?;
     }
 
     let tray = TrayIconBuilder::with_id(ui::TRAY_ID)
@@ -1273,11 +1252,7 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
     let mailbox = dictation::spawn(handle.clone());
     let _ = state.dictation.set(mailbox.clone());
     #[cfg(target_os = "linux")]
-    {
-        platform::init(&handle, &config_dir);
-        platform::notify::listen(&handle);
-        platform::extension::listen(&handle);
-    }
+    platform::init(&handle);
     let keys = handle.clone();
     let listener = HotkeyListener::spawn(settings.hotkey, move |event| {
         let at = Instant::now();
@@ -1285,17 +1260,9 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
             HotkeyEvent::Down => keys.emit("hotkey", "down"),
             HotkeyEvent::Up => keys.emit("hotkey", "up"),
             HotkeyEvent::OtherKey => Ok(()),
-            // A press with no release: the test sees both at once.
-            #[cfg(target_os = "linux")]
-            HotkeyEvent::Toggle => keys.emit("hotkey", "down").and_then(|()| keys.emit("hotkey", "up")),
         }
         .ok();
         if keys.state::<App>().key_test.load(Ordering::SeqCst) {
-            return;
-        }
-        #[cfg(target_os = "linux")]
-        if event == HotkeyEvent::Toggle {
-            let _ = mailbox.send(Msg::Toggle);
             return;
         }
         let _ = mailbox.send(Msg::Hotkey(event, at));
@@ -1330,17 +1297,9 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// Viary was started again while running: `viary --toggle` from GNOME's
-/// custom shortcut acts as the talk shortcut; anything else shows Viary.
+/// Viary was started again while running: shows Viary.
 #[cfg(not(target_os = "macos"))]
-fn another_launch(app: &AppHandle, args: &[String]) {
-    #[cfg(target_os = "linux")]
-    if args.iter().any(|a| a == "--toggle") {
-        platform::hotkey::toggle();
-        return;
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = args;
+fn another_launch(app: &AppHandle) {
     // Setup comes back while it is open or still to finish; a setup
     // window kept hidden after that is not what opening Viary means.
     let setup = app.get_webview_window("setup").filter(|setup| {
@@ -1356,12 +1315,6 @@ fn another_launch(app: &AppHandle, args: &[String]) {
     }
 }
 
-/// `viary --toggle`: see `platform::hotkey`.
-#[cfg(target_os = "linux")]
-pub fn send_toggle() -> bool {
-    platform::hotkey::send_toggle()
-}
-
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1372,11 +1325,11 @@ pub fn run() {
     let builder = tauri::Builder::default();
     // Windows and Linux start a second Viary as readily as the first (at
     // sign-in, then from the Start menu): it would add a second keyboard
-    // hook and tray icon. The second hands its arguments over and quits.
+    // hook and tray icon. The second shows the first and quits.
     // Registered first, as the plugin asks.
     #[cfg(not(target_os = "macos"))]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-        another_launch(app, &args);
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        another_launch(app);
     }));
     let built = builder
         .plugin(tauri_plugin_dialog::init())
@@ -1403,8 +1356,6 @@ pub fn run() {
             resume_dictation,
             set_autostart,
             set_key_test,
-            bind_shortcut,
-            set_typing,
             install_extension,
             finish_setup,
             close_tray_tip,

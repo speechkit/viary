@@ -1,6 +1,7 @@
 //! Viary's GNOME Shell extension (`gnome-extension/` in the repository):
-//! installing it, and asking it to paste, name the focused app, and show
-//! the pill. Its pill buttons come back as a `PillAction` signal.
+//! installing it, and asking it to grab the talk shortcut, paste, name the
+//! focused app, and show the pill. The shortcut going down and up comes
+//! back as its `Talk` signal, the pill's buttons as `PillAction`.
 //!
 //! GNOME on Wayland loads a newly installed extension only at the next
 //! login, so "installed" and "active" are told apart. A new Viary brings
@@ -15,21 +16,64 @@ use std::{
     },
 };
 
-use ashpd::zbus::{self, MatchRule, MessageStream, message::Type};
 use futures_util::StreamExt;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Notify;
+use zbus::proxy::CacheProperties;
 
+use super::hotkey::{self, HotkeyEvent};
 use crate::{
     App,
     dictation::{Msg, PillAction, PillView},
     lock,
 };
 
+/// The extension's D-Bus interface. Its signals are taken only from the
+/// name's current owner: any client on the bus can send a signal naming
+/// any interface.
+#[zbus::proxy(
+    interface = "app.viary.Shell",
+    default_service = "app.viary.Shell",
+    default_path = "/app/viary/Shell"
+)]
+trait Shell {
+    /// Grabs `accelerator` for Viary; false if another app has it.
+    fn bind_talk(&self, accelerator: &str) -> zbus::Result<bool>;
+    fn paste(&self) -> zbus::Result<()>;
+    fn undo(&self) -> zbus::Result<()>;
+    /// The focused window's process and app name.
+    fn focused_app(&self) -> zbus::Result<(i32, String)>;
+    fn show_pill(&self, view: &str) -> zbus::Result<()>;
+    fn set_level(&self, level: f64) -> zbus::Result<()>;
+    fn set_partial(&self, token: u64, text: &str) -> zbus::Result<()>;
+    /// The talk shortcut went down (true) or up.
+    #[zbus(signal)]
+    fn talk(&self, down: bool) -> zbus::Result<()>;
+    /// A pill button: the same names the web pill sends.
+    #[zbus(signal)]
+    fn pill_action(&self, action: String) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn version(&self) -> zbus::Result<u32>;
+}
+
+/// The proxy, made once on Viary's connection.
+async fn shell() -> zbus::Result<ShellProxy<'static>> {
+    static SHELL: tokio::sync::OnceCell<ShellProxy<'static>> = tokio::sync::OnceCell::const_new();
+    SHELL
+        .get_or_try_init(|| async {
+            ShellProxy::builder(&super::session_bus().await?)
+                // The extension's version is read when it appears, not
+                // kept current by signals it does not send.
+                .cache_properties(CacheProperties::No)
+                .build()
+                .await
+        })
+        .await
+        .cloned()
+}
+
 const UUID: &str = "viary@viary.app";
-const BUS: &str = "app.viary.Shell";
-const PATH: &str = "/app/viary/Shell";
 
 const FILES: [(&str, &str); 3] = [
     ("metadata.json", include_str!("../../../../gnome-extension/viary@viary.app/metadata.json")),
@@ -71,7 +115,7 @@ fn installed_version() -> Option<u32> {
     Some(version_in(&script).unwrap_or(0))
 }
 
-/// The version the shell runs, once [`watch_owner`] has asked; 0 if none
+/// The version the shell runs, once [`follow`] has asked; 0 if none
 /// is running or it has not said.
 static RUNNING: AtomicU32 = AtomicU32::new(0);
 
@@ -83,7 +127,7 @@ fn dir() -> Option<PathBuf> {
 }
 
 /// Whether the extension answers: asked once, then kept current by
-/// [`watch_owner`] as the shell's name comes and goes. The pill's level and
+/// [`follow`] as the shell's name comes and goes. The pill's level and
 /// every snapshot ask, so asking must not wait on the bus.
 static ACTIVE: AtomicU8 = AtomicU8::new(UNKNOWN);
 const UNKNOWN: u8 = 0;
@@ -109,17 +153,9 @@ pub fn active() -> bool {
 }
 
 async fn has_owner() -> zbus::Result<bool> {
-    let connection = super::session_bus().await?;
-    let reply = connection
-        .call_method(
-            Some("org.freedesktop.DBus"),
-            "/org/freedesktop/DBus",
-            Some("org.freedesktop.DBus"),
-            "NameHasOwner",
-            &(BUS,),
-        )
-        .await?;
-    reply.body().deserialize()
+    let shell = shell().await?;
+    let dbus = zbus::fdo::DBusProxy::new(shell.inner().connection()).await?;
+    Ok(dbus.name_has_owner(shell.inner().destination().clone()).await?)
 }
 
 pub fn status() -> Status {
@@ -185,30 +221,19 @@ fn add_to_enabled() -> Result<(), String> {
         .map_err(|e| format!("cannot enable the extension: {e}"))
 }
 
-async fn call<B>(method: &str, body: &B) -> zbus::Result<zbus::Message>
-where
-    B: serde::Serialize + zbus::zvariant::DynamicType,
-{
-    let connection = super::session_bus().await?;
-    connection.call_method(Some(BUS), PATH, Some(BUS), method, body).await
-}
-
 /// Ctrl+V, typed by the shell.
 pub fn paste() -> Result<(), String> {
-    tauri::async_runtime::block_on(call("Paste", &())).map(drop).map_err(|e| e.to_string())
+    tauri::async_runtime::block_on(async { shell().await?.paste().await }).map_err(|e| e.to_string())
 }
 
 /// Ctrl+Z, typed by the shell.
 pub fn undo() -> Result<(), String> {
-    tauri::async_runtime::block_on(call("Undo", &())).map(drop).map_err(|e| e.to_string())
+    tauri::async_runtime::block_on(async { shell().await?.undo().await }).map_err(|e| e.to_string())
 }
 
 /// The focused window's process and app name.
 pub fn focused_app() -> Option<(i32, String)> {
-    tauri::async_runtime::block_on(async {
-        let reply = call("FocusedApp", &()).await.ok()?;
-        reply.body().deserialize::<(i32, String)>().ok()
-    })
+    tauri::async_runtime::block_on(async { shell().await?.focused_app().await }).ok()
 }
 
 /// What the shell's pill has yet to be sent.
@@ -239,16 +264,17 @@ fn send(queue: impl FnOnce(&mut Pending)) {
             loop {
                 waiting.notified().await;
                 let Pending { views, level, partial } = std::mem::take(&mut *lock(&PENDING));
+                let Ok(shell) = shell().await else { continue };
                 for json in views {
-                    if let Err(error) = call("ShowPill", &(json,)).await {
+                    if let Err(error) = shell.show_pill(&json).await {
                         tracing::warn!(%error, "cannot show the pill in GNOME Shell");
                     }
                 }
                 if let Some((token, text)) = partial {
-                    let _ = call("SetPartial", &(token, text)).await;
+                    let _ = shell.set_partial(token, &text).await;
                 }
                 if let Some(level) = level {
-                    let _ = call("SetLevel", &(level,)).await;
+                    let _ = shell.set_level(level).await;
                 }
             }
         });
@@ -274,82 +300,50 @@ pub fn partial(token: u64, text: String) {
     send(|pending| pending.partial = Some((token, text)));
 }
 
-/// Acts on the pill's buttons, for as long as Viary runs.
-/// Also follows whether the extension is running.
+/// Follows the extension for as long as Viary runs: whether it runs,
+/// the talk shortcut it reports, and the pill's buttons.
 pub fn listen(app: &AppHandle) {
     update();
     let app = app.clone();
-    let watching = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = actions(&app).await {
-            tracing::warn!(%error, "cannot listen to the GNOME Shell pill");
-        }
-    });
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = watch_owner(&watching).await {
+        if let Err(error) = follow(&app).await {
             tracing::warn!(%error, "cannot follow the GNOME Shell extension");
         }
     });
 }
 
-/// Keeps [`ACTIVE`] current: the extension's name gains an owner when the
-/// shell turns it on, and loses it when the shell turns it off or restarts.
-async fn watch_owner(app: &AppHandle) -> zbus::Result<()> {
-    const DBUS: &str = "org.freedesktop.DBus";
-    let connection = super::session_bus().await?;
+async fn follow(app: &AppHandle) -> zbus::Result<()> {
+    let shell = shell().await?;
     // Subscribed before asking, so no change falls in between.
-    let rule = MatchRule::builder()
-        .msg_type(Type::Signal)
-        .sender(DBUS)?
-        .interface(DBUS)?
-        .member("NameOwnerChanged")?
-        .add_arg(BUS)?
-        .build();
-    let mut stream = MessageStream::for_match_rule(rule, &connection, None).await?;
-    let owned = has_owner().await?;
-    read_running_version(owned).await;
-    if set_active(owned) {
-        crate::ui::refresh(app);
-    }
-    while let Some(message) = stream.next().await {
-        let Ok(message) = message else { continue };
-        // Only the bus itself may say who owns a name; no client can own
-        // `org.freedesktop.DBus`.
-        if message.header().sender().is_none_or(|sender| sender.as_str() != DBUS) {
-            continue;
-        }
-        let Ok((name, _old, new)) = message.body().deserialize::<(String, String, String)>() else {
-            continue;
-        };
-        if name == BUS {
-            read_running_version(!new.is_empty()).await;
-            if set_active(!new.is_empty()) {
-                crate::ui::refresh(app);
+    let mut owners = shell.inner().receive_owner_changed().await?;
+    let mut talks = shell.receive_talk().await?;
+    let mut actions = shell.receive_pill_action().await?;
+    appeared(app, &shell, has_owner().await?).await;
+    loop {
+        tokio::select! {
+            Some(owner) = owners.next() => appeared(app, &shell, owner.is_some()).await,
+            Some(talk) = talks.next() => {
+                let Ok(args) = talk.args() else { continue };
+                hotkey::report(if args.down { HotkeyEvent::Down } else { HotkeyEvent::Up });
             }
+            Some(action) = actions.next() => {
+                let Ok(args) = action.args() else { continue };
+                match serde_json::from_value::<PillAction>(serde_json::Value::String(args.action)) {
+                    Ok(action) => app.state::<App>().send(Msg::Pill(action)),
+                    Err(error) => tracing::warn!(%error, "unknown pill action from GNOME Shell"),
+                }
+            }
+            else => return Ok(()),
         }
     }
-    Ok(())
 }
 
-/// Asks the shell which version it runs, if it runs one.
-async fn read_running_version(running: bool) {
+/// The extension started (`running`) or stopped: notes its version, and
+/// asks it for the talk shortcut on Wayland. An extension older than the
+/// shortcut cannot grab it; the user logs in again for the new one.
+async fn appeared(app: &AppHandle, shell: &ShellProxy<'static>, running: bool) {
     let version = if running {
-        async {
-            let reply = super::session_bus()
-                .await?
-                .call_method(
-                    Some(BUS),
-                    PATH,
-                    Some("org.freedesktop.DBus.Properties"),
-                    "Get",
-                    &(BUS, "Version"),
-                )
-                .await?;
-            let value: zbus::zvariant::OwnedValue = reply.body().deserialize()?;
-            Ok::<u32, zbus::Error>(u32::try_from(value).unwrap_or(0))
-        }
-        .await
-        .unwrap_or_else(|error| {
+        shell.version().await.unwrap_or_else(|error| {
             tracing::warn!(%error, "cannot ask the GNOME Shell extension its version");
             0
         })
@@ -357,40 +351,32 @@ async fn read_running_version(running: bool) {
         0
     };
     RUNNING.store(version, Ordering::SeqCst);
-}
-
-async fn actions(app: &AppHandle) -> zbus::Result<()> {
-    let connection = super::session_bus().await?;
-    let rule = MatchRule::builder()
-        .msg_type(Type::Signal)
-        .path(PATH)?
-        .interface(BUS)?
-        .member("PillAction")?
-        .build();
-    let mut stream = MessageStream::for_match_rule(rule, &connection, None).await?;
-    while let Some(message) = stream.next().await {
-        let Ok(message) = message else { continue };
-        if !super::sent_by(&message, BUS).await {
-            tracing::warn!("a PillAction signal not from Viary's extension; ignored");
-            continue;
-        }
-        let Ok(action) = message.body().deserialize::<String>() else {
-            continue;
-        };
-        // The same names the web pill sends: "undo", "useRaw", "stop"...
-        match serde_json::from_value::<PillAction>(serde_json::Value::String(action)) {
-            Ok(action) => app.state::<App>().send(Msg::Pill(action)),
-            Err(error) => tracing::warn!(%error, "unknown pill action from GNOME Shell"),
-        }
+    let changed = set_active(running);
+    if super::is_wayland() {
+        let bound = running
+            && match shell.bind_talk(hotkey::ACCELERATOR).await {
+                Ok(true) => true,
+                Ok(false) => {
+                    tracing::warn!("another app holds Ctrl+Alt+Space");
+                    false
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "the GNOME Shell extension cannot grab the talk shortcut");
+                    false
+                }
+            };
+        hotkey::set_bound(bound);
     }
-    Ok(())
+    if changed {
+        crate::ui::refresh(app);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn the_bundled_extension_names_its_version() {
-        assert!(super::bundled_version() >= 2);
+        assert!(super::bundled_version() >= 3);
         assert_eq!(super::version_in("const VERSION = 12;\n"), Some(12));
         assert_eq!(super::version_in("const OTHER = 1;"), None);
     }
@@ -409,12 +395,12 @@ mod tests {
         assert_eq!(super::status(), super::Status::Active);
         // The status check connected, owning Viary's client name: the
         // extension answers this process as it answers Viary.
-        tauri::async_runtime::block_on(super::call(
-            "ShowPill",
-            &(r#"{"kind":"hint","text":"CI"}"#,),
-        ))
-        .expect("ShowPill");
-        tauri::async_runtime::block_on(super::call("SetLevel", &(0.1_f64,))).expect("SetLevel");
+        tauri::async_runtime::block_on(async {
+            let shell = super::shell().await.expect("proxy");
+            assert!(shell.bind_talk(super::hotkey::ACCELERATOR).await.expect("BindTalk"));
+            shell.show_pill(r#"{"kind":"hint","text":"CI"}"#).await.expect("ShowPill");
+            shell.set_level(0.1).await.expect("SetLevel");
+        });
         assert!(super::focused_app().is_some(), "FocusedApp did not answer");
         super::paste().expect("Paste");
         super::undo().expect("Undo");

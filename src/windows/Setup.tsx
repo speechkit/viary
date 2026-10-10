@@ -1,33 +1,21 @@
 // The setup window on Windows (WinOnboarding artboard) and Ubuntu
-// (LinuxShortcut, LinuxTyping): five steps, from the microphone to a first
-// dictation. Viary runs in the tray all along; closing the window leaves
+// (LinuxShortcut): from the microphone to a first dictation. Viary runs in the tray all along; closing the window leaves
 // setup for the next launch.
 
-import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ErrorBanner, Switch } from "../components/Controls";
 import { Icon, Mark } from "../components/Icons";
 import { AddModel, chooseVad, useAddModel } from "../pages/Engine";
-import { api, engineName, errorText, formatBytes, useHotkey, useMicLevel, usePillView, useSnapshot, type Desktop, type Hotkey, type PillView, type Snapshot, type Typing } from "../lib/ipc";
+import { api, engineName, errorText, formatBytes, useHotkey, useMicLevel, usePillView, useSnapshot, shortcutTrouble, type Desktop, type Hotkey, type PillView, type Snapshot } from "../lib/ipc";
 import { PLATFORM, THIS_COMPUTER } from "../lib/platform";
 
 /** GNOME's look and steps: Ubuntu. Windows otherwise. */
 const GNOME = PLATFORM === "linux";
 
 const STEPS = GNOME
-  ? ["Microphone", "Talk shortcut", "Typing into apps", "Voice engine", "Try it"]
+  ? ["Microphone", "Talk shortcut", "Voice engine", "Try it"]
   : ["Microphone access", "Talk key", "Voice engine", "Keep it in the tray", "Try it"];
-
-/** The steps by name, as Viary asks for one: `?step=typing` when it opens
- *  the window, a `setup-step` event when it is open. */
-const STEP_IDS = GNOME
-  ? ["microphone", "shortcut", "typing", "engine", "try"]
-  : ["microphone", "key", "engine", "tray", "try"];
-
-function stepIndex(id: string | null): number {
-  return Math.max(0, id ? STEP_IDS.indexOf(id) : 0);
-}
 
 /** What the sidebar says under the steps, for each step (Windows). */
 const NOTES = [
@@ -356,7 +344,7 @@ const KEYS: { key: Hotkey; caps: string[]; label: string; note: string }[] = [
 
 /** Press the talk key to see Viary hear it. While shown, the key only
  *  reports itself: no dictation, no hints. */
-export function KeyTest({ name, toggle = false }: { name: string; toggle?: boolean }) {
+export function KeyTest({ name }: { name: string }) {
   useEffect(() => {
     api.setKeyTest(true);
     // A hidden window keeps its page: the test follows the window's focus,
@@ -386,13 +374,7 @@ export function KeyTest({ name, toggle = false }: { name: string; toggle?: boole
   );
   const tested = held !== null;
   const title = pressed !== null ? "Held… now let go" : tested ? "Viary hears it" : "Press it now to test";
-  const text = tested
-    ? toggle
-      ? `Detected: ${name}`
-      : `Detected: ${name} held for ${(held / 1000).toFixed(1)} s`
-    : toggle
-      ? `Press ${name} once.`
-      : `Hold ${name} for a moment, then release it.`;
+  const text = tested ? `Detected: ${name} held for ${(held / 1000).toFixed(1)} s` : `Hold ${name} for a moment, then release it.`;
   return (
     <div role="status" className="flex items-center gap-4 rounded-[10px] border border-dashed border-stone bg-white px-[18px] py-4">
       <Key dark>{name}</Key>
@@ -531,7 +513,7 @@ function GnomeEngineStep({ s }: { s: Snapshot }) {
   const needsVad = !!local && !!family(local.id)?.needsVad && !s.settings.vadModel;
   return (
     <>
-      <Heading step={3} title="Choose how Viary listens">
+      <Heading step={2} title="Choose how Viary listens">
         A speech model on this computer keeps your voice here. Or use OpenAI or DashScope with your own API key.
       </Heading>
       <span className="-mb-3 text-[13px] font-bold text-[#5E5E5E]">On this computer</span>
@@ -719,39 +701,73 @@ function Keys({ keys }: { keys: string[] }) {
   );
 }
 
-const TALK = ["Ctrl", "Alt", "Space"];
+/** What the extension's state means for the user. */
+const EXTENSION: Record<Desktop["extension"], string> = {
+  missing: "Not installed yet.",
+  installed: "Installed. Log out and back in, and GNOME starts it.",
+  active: "Running.",
+  updated: "Running. Viary brought a newer version, which starts the next time you log in.",
+};
 
+/** The talk shortcut. On Wayland only Viary's GNOME Shell extension can
+ *  hear it and type: installed here, it runs from the next login. */
 function ShortcutStep({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
-  const { mode, bound } = desktop.shortcut;
-  const toggle = mode === "toggle";
-  const x11 = desktop.session === "x11";
-  // Once bound, the keys GNOME has, which the user may have changed.
-  const talk = bound ? s.hotkeyName.split("+") : TALK;
+  const [error, setError] = useState("");
+  const [installing, setInstalling] = useState(false);
+  const install = async () => {
+    setError("");
+    setInstalling(true);
+    try {
+      await api.installExtension();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setInstalling(false);
+    }
+  };
+  const wayland = desktop.session === "wayland";
+  const running = desktop.extension === "active" || desktop.extension === "updated";
+  const talk = s.hotkeyName.split("+");
+  // The extension's row says what it lacks; below, only other trouble.
+  const trouble = !wayland || running ? shortcutTrouble(s) : null;
   return (
     <>
-      <Heading step={1} title="Set your talk shortcut">
-        {x11
-          ? "On X11 Viary listens for the shortcut itself; nothing to allow."
-          : "GNOME keeps global shortcuts for itself. Viary asks it to hand these over; you can change them later in GNOME Settings."}
+      <Heading step={1} title="Set up your talk shortcut">
+        {wayland
+          ? "On Wayland, apps can’t hear global keys or type into other windows. Viary’s GNOME Shell extension does both for it, and draws the pill at the bottom of the screen."
+          : "On X11 Viary listens for the shortcut and types by itself; nothing to install."}
       </Heading>
+      <ErrorBanner error={error} onDismiss={() => setError("")} />
+      {wayland && (
+        <Status
+          ok={running}
+          title="Viary’s GNOME Shell extension"
+          text={EXTENSION[desktop.extension]}
+          action={
+            desktop.extension === "missing" && (
+              <button type="button" className={btn} disabled={installing} onClick={install}>
+                Install…
+              </button>
+            )
+          }
+        />
+      )}
       <div className={boxed}>
         <div className={row}>
           <div className="flex grow flex-col">
             <span>Talk</span>
-            <span className={sub}>{toggle ? "Press to start, press again to type" : "Hold to speak, release to type"}</span>
+            <span className={sub}>Hold to speak, release to type</span>
           </div>
           <Keys keys={talk} />
         </div>
-        {!toggle && (
-          <div className={row}>
-            <div className="flex grow flex-col">
-              <span>Hands-free</span>
-              <span className={sub}>Tap twice to start, once to stop</span>
-            </div>
-            <Keys keys={talk} />
-            <span className={sub}>×2</span>
+        <div className={row}>
+          <div className="flex grow flex-col">
+            <span>Hands-free</span>
+            <span className={sub}>Tap twice to start, once to stop</span>
           </div>
-        )}
+          <Keys keys={talk} />
+          <span className={sub}>×2</span>
+        </div>
         <div className={row + " opacity-55"}>
           <div className="flex grow flex-col">
             <span>Edit selection</span>
@@ -760,118 +776,7 @@ function ShortcutStep({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
           <Keys keys={["Ctrl", "Alt", "Shift", "Space"]} />
         </div>
       </div>
-      {toggle && (
-        <div className="rounded-xl bg-[#FDF3D6] px-4 py-3 text-[13px] leading-normal text-[#5C4400]">
-          This GNOME can’t tell Viary when a key is released. Here, Talk is a toggle: press to start, press again to
-          type. Viary adds it as a GNOME custom shortcut.
-        </div>
-      )}
-      {bound && <KeyTest name={s.hotkeyName} toggle={toggle} />}
-    </>
-  );
-}
-
-const TYPING: { id: Typing; title: string; text: string }[] = [
-  {
-    id: "extension",
-    title: "Viary’s GNOME Shell extension",
-    text: "Types directly and adds the floating pill at the bottom of the screen. No prompts, works in every app.",
-  },
-  {
-    id: "portal",
-    title: "Ask GNOME for keyboard access",
-    text: "Uses GNOME’s remote-interaction permission. GNOME asks once, and shows a sharing icon in the top bar while Viary types.",
-  },
-  {
-    id: "clipboard",
-    title: "Clipboard only",
-    text: "Viary copies the text and tells you; you press Ctrl+V. Nothing extra to allow.",
-  },
-];
-
-function TypingStep({ desktop }: { s: Snapshot; desktop: Desktop }) {
-  const [error, setError] = useState("");
-  const [asking, setAsking] = useState(false);
-  const run = async (work: () => Promise<void>) => {
-    setError("");
-    setAsking(true);
-    try {
-      await work();
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setAsking(false);
-    }
-  };
-  const choose = (method: Typing) => run(() => api.setTyping(method));
-  const install = () => run(() => api.installExtension());
-  if (desktop.session === "x11") {
-    return (
-      <>
-        <Heading step={2} title="Typing into apps">
-          You are running an X11 session: Viary types directly, and none of the Wayland choices apply.
-        </Heading>
-        <Status ok title="Viary can type into other apps" text="Text goes in with Ctrl+V, and your clipboard is put back." />
-      </>
-    );
-  }
-  return (
-    <>
-      <Heading step={2} title="How should Viary type?">
-        On Wayland, apps can’t type into other windows on their own. Pick how GNOME lets Viary do it.
-      </Heading>
-      <ErrorBanner error={error} onDismiss={() => setError("")} />
-      <div role="radiogroup" aria-label="Typing method" className={boxed}>
-        {TYPING.map((t) => {
-          // The extension can be chosen once it runs: from the next login.
-          const waiting = t.id === "extension" && desktop.extension !== "active" && desktop.extension !== "updated";
-          const on = !waiting && desktop.typing === t.id;
-          return (
-            <div key={t.id} className={row + " py-3.5"}>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={on}
-                disabled={waiting || asking}
-                onClick={() => choose(t.id)}
-                className="flex grow items-center gap-3 text-left disabled:cursor-default"
-              >
-                <span
-                  aria-hidden="true"
-                  className={
-                    "size-[18px] shrink-0 rounded-full " +
-                    (on ? "border-[5px] border-[#C34113]" : "border-[1.5px] border-[#B0B0B0]") +
-                    (waiting ? " opacity-50" : "")
-                  }
-                />
-                <span className="flex grow flex-col gap-1">
-                  <span className="flex items-center gap-2">
-                    {t.title}
-                    {t.id === "extension" && (
-                      <span className="rounded-full bg-[#E1F2E8] px-2 py-0.5 text-[11px] font-semibold text-[#1D5E3C]">Recommended</span>
-                    )}
-                  </span>
-                  <span className={sub}>
-                    {t.id === "extension" && desktop.extension === "installed"
-                      ? "Installed. Log out and back in, and GNOME starts it; then choose it here."
-                      : t.id === "extension" && desktop.extension === "updated"
-                        ? `${t.text} Updated with Viary: the new version runs from your next login.`
-                        : t.text}
-                  </span>
-                </span>
-              </button>
-              {t.id === "extension" && desktop.extension === "missing" && (
-                <button type="button" className={btn} disabled={asking} onClick={install}>
-                  Install…
-                </button>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      {desktop.typing === "portal" && desktop.portalAllowed && (
-        <span className={sub}>GNOME allowed Viary to type. You can take it back in GNOME Settings › Privacy.</span>
-      )}
+      {s.hotkeyActive ? <KeyTest name={s.hotkeyName} /> : trouble && <span className={sub}>{trouble}</span>}
     </>
   );
 }
@@ -879,11 +784,13 @@ function TypingStep({ desktop }: { s: Snapshot; desktop: Desktop }) {
 type Body = (props: { s: Snapshot; desktop: Desktop }) => React.ReactNode;
 
 const BODIES: Body[] = GNOME
-  ? [GnomeMicrophoneStep, ShortcutStep, TypingStep, GnomeEngineStep, GnomeTryStep]
+  ? [GnomeMicrophoneStep, ShortcutStep, GnomeEngineStep, GnomeTryStep]
   : [MicrophoneStep, TalkKeyStep, EngineStep, TrayStep, TryStep];
 
-/** The voice engine step, which may be skipped. */
-const ENGINE = GNOME ? 3 : 2;
+/** The steps that may be skipped: the voice engine, and on GNOME the talk
+ *  shortcut, which waits for a login when the extension is new. */
+const ENGINE = 2;
+const SHORTCUT = GNOME ? 1 : -1;
 
 function clock(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -920,10 +827,9 @@ const TONE = {
   warn: "bg-[#E5A50A]",
 };
 
-/** A first dictation on GNOME, worded for the shortcut and the typing
- *  method, with its progress shown here: on Wayland without the extension
- *  there is no pill on screen to watch. */
-function GnomeTryStep({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
+/** A first dictation on GNOME, with its progress shown here as well as in
+ *  the pill. */
+function GnomeTryStep({ s }: { s: Snapshot }) {
   const field = useRef<HTMLTextAreaElement>(null);
   useEffect(() => field.current?.focus(), []);
   const view = usePillView();
@@ -939,22 +845,18 @@ function GnomeTryStep({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
     if (view.kind === "inserted" || view.kind === "copied") setWorked(true);
   }, [view.kind]);
   const key = s.hotkeyName;
-  const toggle = desktop.shortcut.mode === "toggle";
-  const clipboardOnly = desktop.session === "wayland" && desktop.typing === "clipboard";
   const state = progress(view, now);
   return (
     <>
-      <Heading step={4} title="Say something">
-        {toggle
-          ? `Press ${key}, speak, and press it again to type.`
-          : `Hold ${key}, speak, and let go. Double-tap it to keep listening hands-free until you tap again.`}
+      <Heading step={3} title="Say something">
+        {`Hold ${key}, speak, and let go. Double-tap it to keep listening hands-free until you tap again.`}
       </Heading>
       <div className={boxed}>
         <textarea
           ref={field}
           rows={5}
           aria-label="Try it here"
-          placeholder={toggle ? `Press ${key} and say something.` : `Hold ${key} and say something.`}
+          placeholder={`Hold ${key} and say something.`}
           className="block w-full resize-none bg-white px-4 py-3 text-[15px] leading-[1.6] outline-none"
         />
         <div role="status" className="flex min-h-11 items-center gap-2.5 border-t border-black/8 px-4 text-[13px]">
@@ -973,12 +875,6 @@ function GnomeTryStep({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
           )}
         </div>
       </div>
-      {clipboardOnly && (
-        <span className={sub}>
-          Viary is set to clipboard only: when the text is ready, press Ctrl+V here. You can change this in the step
-          before.
-        </span>
-      )}
       <span className={sub}>It works the same in any app: Text Editor, Firefox, Terminal, LibreOffice.</span>
     </>
   );
@@ -987,74 +883,38 @@ function GnomeTryStep({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
 /** Whether a step's requirement is met, so Continue can go on. */
 function ready(step: number, s: Snapshot): boolean {
   if (step === 0) return s.permissions.microphone !== false;
+  if (step === SHORTCUT) return s.hotkeyActive;
   if (step === ENGINE) return !!s.engine.active;
   return true;
 }
 
-/** The talk shortcut step on GNOME: until GNOME hands it over, the main
- *  button asks for it. */
-function asksGnome(step: number, desktop: Desktop | null): boolean {
-  return GNOME && step === 1 && !!desktop && !desktop.shortcut.bound;
-}
-
 export function Setup() {
   const [s] = useSnapshot();
-  const [step, setStep] = useState(() => stepIndex(new URLSearchParams(window.location.search).get("step")));
-  useEffect(() => {
-    const unlisten = listen<string>("setup-step", (e) => setStep(stepIndex(e.payload)));
-    return () => {
-      unlisten.then((stop) => stop());
-    };
-  }, []);
-  const [asking, setAsking] = useState(false);
-  const [error, setError] = useState("");
+  const [step, setStep] = useState(0);
   if (!s) return null;
-  // Windows has no desktop choices; its steps never read these.
-  const desktop: Desktop = s.desktop ?? {
-    session: "x11",
-    shortcut: { mode: "hold", bound: true },
-    typing: "clipboard",
-    portalAllowed: false,
-    extension: "missing",
-  };
+  // Windows has no desktop; its steps never read this.
+  const desktop: Desktop = s.desktop ?? { session: "x11", extension: "missing" };
   const last = step === STEPS.length - 1;
   const Body = BODIES[step];
-  const ask = async () => {
-    setError("");
-    setAsking(true);
-    try {
-      await api.bindShortcut();
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setAsking(false);
-    }
-  };
   const footer = (
     <div className="flex justify-between">
       <button type="button" className={btn} disabled={step === 0} onClick={() => setStep(step - 1)}>
         Back
       </button>
       <div className="flex gap-2">
-        {((step === ENGINE && !ready(step, s)) || asksGnome(step, s.desktop)) && (
+        {(step === ENGINE || step === SHORTCUT) && !ready(step, s) && (
           <button type="button" className={btn} onClick={() => setStep(step + 1)}>
             Skip for now
           </button>
         )}
-        {asksGnome(step, s.desktop) ? (
-          <button type="button" className={btnPrimary} disabled={asking} onClick={ask}>
-            {desktop.shortcut.mode === "toggle" ? "Add the shortcut" : "Ask GNOME…"}
-          </button>
-        ) : (
-          <button
-            type="button"
-            className={btnPrimary}
-            disabled={!ready(step, s)}
-            onClick={() => (last ? api.finishSetup() : setStep(step + 1))}
-          >
-            {last ? "Done" : "Continue"}
-          </button>
-        )}
+        <button
+          type="button"
+          className={btnPrimary}
+          disabled={!ready(step, s)}
+          onClick={() => (last ? api.finishSetup() : setStep(step + 1))}
+        >
+          {last ? "Done" : "Continue"}
+        </button>
       </div>
     </div>
   );
@@ -1069,7 +929,6 @@ export function Setup() {
           </aside>
           <main className="scroll flex grow flex-col gap-5 px-11 py-9">
             <Body s={s} desktop={desktop} />
-            <ErrorBanner error={error} onDismiss={() => setError("")} />
             <div className="grow" />
             {footer}
           </main>

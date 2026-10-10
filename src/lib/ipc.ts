@@ -165,19 +165,26 @@ export interface SpeechCaps {
   mock: boolean;
 }
 
-export type Typing = "extension" | "portal" | "clipboard";
-
 export interface Desktop {
   session: "wayland" | "x11";
-  /** `hold` reports down and up; `toggle` (GNOME 46) only presses. */
-  shortcut: { mode: "hold" | "toggle" | "unknown"; bound: boolean };
-  typing: Typing;
-  /** GNOME already allowed typing through the RemoteDesktop portal. */
-  portalAllowed: boolean;
-  /** Viary's GNOME Shell extension: runs only from the login after it is
+  /** Viary's GNOME Shell extension, which hears the talk shortcut, types,
+   *  and draws the pill on Wayland: runs only from the login after it is
    *  installed. `updated`: running, and a newer version, brought by this
    *  Viary, runs from the next login. */
   extension: "missing" | "installed" | "active" | "updated";
+}
+
+/** Why the talk shortcut does nothing on Linux, or null if it works (or
+ *  elsewhere). On Wayland only Viary's extension can hear it. */
+export function shortcutTrouble(s: Snapshot): string | null {
+  const desktop = s.desktop;
+  if (s.hotkeyActive || !desktop) return null;
+  if (desktop.session === "wayland") {
+    if (desktop.extension === "missing") return "Viary’s GNOME Shell extension isn’t installed.";
+    if (desktop.extension === "installed") return "Log out and back in, and GNOME starts Viary’s extension.";
+    if (desktop.extension === "updated") return "Log out and back in to start the updated extension.";
+  }
+  return `Another app holds ${s.hotkeyName}.`;
 }
 
 export interface Snapshot {
@@ -195,7 +202,7 @@ export interface Snapshot {
   paused: { until: number | null } | null;
   /** Viary starts when the user signs in. */
   autostart: boolean;
-  /** The GNOME session, talk shortcut, and typing method on Linux; null elsewhere. */
+  /** The GNOME session and Viary's extension on Linux; null elsewhere. */
   desktop: Desktop | null;
   /** The keyboard layout on Windows: whether Right Alt is AltGr. Null elsewhere. */
   keyboard: { altGr: boolean } | null;
@@ -460,10 +467,6 @@ export const api = {
   micTest: (on: boolean) => invoke<void>("mic_test", { on }),
   /** Closes the first-launch tray tip; `showMe` opens the taskbar settings (Windows). */
   closeTrayTip: (showMe: boolean) => invoke<void>("close_tray_tip", { showMe }),
-  /** Asks GNOME for the talk shortcut (Linux). */
-  bindShortcut: () => invoke<void>("bind_shortcut"),
-  /** How Viary types on Wayland; `portal` asks GNOME now (Linux). */
-  setTyping: (method: Typing) => invoke<void>("set_typing", { method }),
   /** Installs Viary's GNOME Shell extension; it runs from the next login (Linux). */
   installExtension: () => invoke<void>("install_extension"),
   quit: () => invoke<void>("quit"),

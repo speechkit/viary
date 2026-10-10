@@ -4,7 +4,7 @@
 import { useState } from "react";
 import { ErrorBanner, Switch } from "../components/Controls";
 import { Icon, Kbd } from "../components/Icons";
-import { api, errorText, type Desktop, type Hotkey, type Snapshot, type Typing } from "../lib/ipc";
+import { api, errorText, shortcutTrouble, type Desktop, type Hotkey, type Snapshot } from "../lib/ipc";
 import { PLATFORM, type Platform } from "../lib/platform";
 import { KeyTest } from "../windows/Setup";
 
@@ -151,30 +151,22 @@ function Startup({ s }: { s: Snapshot }) {
   );
 }
 
-const TYPING: { id: Typing; title: string; text: string }[] = [
-  { id: "extension", title: "Viary’s GNOME Shell extension", text: "Types directly, no prompts, and draws the pill at the bottom of the screen." },
-  { id: "portal", title: "GNOME keyboard access", text: "GNOME asks once, and shows a sharing icon in the top bar while Viary types." },
-  { id: "clipboard", title: "Clipboard only", text: "Viary copies the text and tells you; you press Ctrl+V." },
-];
-
-/** Linux: the talk shortcut GNOME hands over, how Viary types, its GNOME
- *  Shell extension, and the microphone. The same state as setup. */
+/** Linux: the talk shortcut, Viary's GNOME Shell extension, which hears
+ *  it and types on Wayland, and the microphone. The same state as setup. */
 function LinuxSettings({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const run = async (work: () => Promise<void>) => {
+  const install = async () => {
     setError("");
     setBusy(true);
     try {
-      await work();
+      await api.installExtension();
     } catch (e) {
       setError(errorText(e));
     } finally {
       setBusy(false);
     }
   };
-  const { mode, bound } = desktop.shortcut;
-  const toggle = mode === "toggle";
   const wayland = desktop.session === "wayland";
   const extension = desktop.extension;
   return (
@@ -184,87 +176,43 @@ function LinuxSettings({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
       <h2 className={h2}>Talk shortcut</h2>
       <div className={card}>
         <Row
-          tone={bound ? "ok" : "attention"}
+          tone={s.hotkeyActive ? "ok" : "attention"}
           title={s.hotkeyName}
           text={
-            !wayland
-              ? "Viary listens for it itself on X11."
-              : bound
-                ? toggle
-                  ? "A GNOME custom shortcut: press to start, press again to insert. This GNOME can’t report the key being released."
-                  : "GNOME hands it to Viary: hold to speak, release to insert, double-tap for hands-free."
-                : "GNOME has not handed it to Viary yet."
+            shortcutTrouble(s) ??
+            (wayland
+              ? "Viary’s extension hears it: hold to speak, release to insert, double-tap for hands-free."
+              : "Viary listens for it itself on X11.")
           }
-        >
-          {wayland && !bound ? (
-            <button type="button" className={btn} disabled={busy} onClick={() => run(api.bindShortcut)}>
-              {toggle ? "Add the shortcut" : "Ask GNOME…"}
-            </button>
-          ) : (
-            wayland && (
-              <button type="button" className={btn} onClick={() => api.requestPermission("inputMonitoring")}>
-                Keyboard Settings
-              </button>
-            )
-          )}
-        </Row>
+        />
       </div>
-      {wayland && bound && (
-        <span className="text-[13px] text-muted">
-          To use other keys, change Viary’s shortcut in GNOME Settings › Keyboard.
-        </span>
-      )}
 
       <h2 className={h2}>Typing into apps</h2>
-      {wayland ? (
-        <div role="radiogroup" aria-label="Typing method" className={card}>
-          {TYPING.map((t) => {
-            const waiting = t.id === "extension" && extension !== "active" && extension !== "updated";
-            const on = !waiting && desktop.typing === t.id;
-            return (
-              <div key={t.id} className="flex items-center gap-3.5 border-b border-hair px-[18px] py-3 last:border-b-0">
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={on}
-                  disabled={waiting || busy}
-                  onClick={() => run(() => api.setTyping(t.id))}
-                  className="flex min-w-0 grow items-center gap-3.5 text-left disabled:cursor-default"
-                >
-                  <span
-                    aria-hidden="true"
-                    className={"size-[18px] shrink-0 rounded-full" + (waiting ? " opacity-50" : "")}
-                    style={{ border: on ? "5px solid #1C1B18" : "1.5px solid #CFC8B8" }}
-                  />
-                  <span className="flex min-w-0 grow flex-col gap-0.5">
-                    <span className="text-sm font-medium">{t.title}</span>
-                    <span className="text-[13px] leading-[1.45] text-muted">
-                      {t.id === "extension" && extension === "missing"
-                        ? `${t.text} Not installed.`
-                        : t.id === "extension" && extension === "installed"
-                          ? "Installed. GNOME starts it the next time you log in."
-                          : t.id === "extension" && extension === "updated"
-                            ? `${t.text} Updated with Viary: the new version runs the next time you log in.`
-                          : t.id === "portal" && desktop.portalAllowed
-                            ? "GNOME allowed it. Take it back in GNOME Settings › Privacy."
-                            : t.text}
-                    </span>
-                  </span>
-                </button>
-                {t.id === "extension" && extension === "missing" && (
-                  <button type="button" className={btn} disabled={busy} onClick={() => run(api.installExtension)}>
-                    Install…
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        <div className={card}>
+      <div className={card}>
+        {wayland ? (
+          <Row
+            tone={extension === "active" || extension === "updated" ? "ok" : "attention"}
+            title="Viary’s GNOME Shell extension"
+            text={
+              extension === "missing"
+                ? "Hears the talk shortcut, types directly, and draws the pill at the bottom of the screen. Not installed."
+                : extension === "installed"
+                  ? "Installed. GNOME starts it the next time you log in."
+                  : extension === "updated"
+                    ? "Running. Updated with Viary: the new version runs the next time you log in."
+                    : "Running: it types directly and draws the pill at the bottom of the screen."
+            }
+          >
+            {extension === "missing" && (
+              <button type="button" className={btn} disabled={busy} onClick={install}>
+                Install…
+              </button>
+            )}
+          </Row>
+        ) : (
           <Row tone="ok" title="Viary types directly" text="On X11, text goes in with Ctrl+V, and your clipboard is put back." />
-        </div>
-      )}
+        )}
+      </div>
 
       <h2 className={h2}>Microphone</h2>
       <div className={card}>

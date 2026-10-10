@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Runs a headless GNOME Shell (Wayland, as GNOME 50 always is) with
 # Viary's extension, then checks what Viary relies on: the extension
-# answers Viary on D-Bus and no one else, and the portals for the talk shortcut and for typing
-# are there. Ends with the
-# Linux tests that need a running GNOME (`cargo test -- --ignored gnome_`).
+# answers Viary on D-Bus and no one else. Ends with the Linux tests that
+# need a running GNOME (`cargo test -- --ignored gnome_`).
 #
 # Run inside its own session bus: dbus-run-session -- ci/gnome-wayland.sh
 set -euo pipefail
@@ -15,11 +14,9 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$(mktemp -d)}"
 chmod 700 "$XDG_RUNTIME_DIR"
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=GNOME
-# Services D-Bus starts on demand, the desktop portal among them, see
-# only this environment. Without XDG_CURRENT_DESKTOP the portal falls back
-# to its GTK backends, which have no GlobalShortcuts or RemoteDesktop. The
-# display names are the ones GNOME Shell takes; they are not exported, so
-# the shell itself does not run as a nested client.
+# Services D-Bus starts on demand see only this environment. The display
+# names are the ones GNOME Shell takes; they are not exported, so the
+# shell itself does not run as a nested client.
 dbus-update-activation-environment \
   XDG_RUNTIME_DIR XDG_SESSION_TYPE XDG_CURRENT_DESKTOP WAYLAND_DISPLAY=wayland-0 DISPLAY=:0
 
@@ -60,24 +57,19 @@ echo "--- the extension"
 viary --method org.freedesktop.DBus.Properties.Get app.viary.Shell Version
 # Only Viary's own connection (owning app.viary.App) is answered; the
 # Rust test below calls as Viary does. Anyone else is refused.
-for method in Paste Undo FocusedApp; do
-  if viary --method "app.viary.Shell.$method" 2>"$log.denied"; then
+refused() {
+  local method=$1
+  shift
+  if viary --method "app.viary.Shell.$method" "$@" 2>"$log.denied"; then
     echo "::error::the extension answered $method from a client that is not Viary"
     exit 1
   fi
   grep -q AccessDenied "$log.denied"
-done
-
-echo "--- the portals"
-portal() {
-  gdbus call --session --dest org.freedesktop.portal.Desktop \
-    --object-path /org/freedesktop/portal/desktop \
-    --method org.freedesktop.DBus.Properties.Get "org.freedesktop.portal.$1" version
 }
-# Hold-to-talk needs GlobalShortcuts; typing without the extension,
-# RemoteDesktop.
-portal GlobalShortcuts
-portal RemoteDesktop
+refused Paste
+refused Undo
+refused FocusedApp
+refused BindTalk "'<Control><Alt>space'"
 
 echo "--- Viary's tests against GNOME"
 cd "$repo/src-tauri"

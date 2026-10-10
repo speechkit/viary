@@ -1,7 +1,9 @@
-// Viary's GNOME Shell extension. Wayland lets no app type into another or
-// float a window above the rest; the shell can do both. Viary calls this
-// over D-Bus to paste (Ctrl+V), undo (Ctrl+Z), learn which app has focus,
-// and show its dictation pill, whose buttons come back as a signal.
+// Viary's GNOME Shell extension. Wayland lets no app hear a global key,
+// type into another app, or float a window above the rest; the shell can
+// do all three. Viary calls this over D-Bus to grab its talk shortcut
+// (reported held and released as a signal), paste (Ctrl+V), undo (Ctrl+Z),
+// learn which app has focus, and show its dictation pill, whose buttons
+// come back as a signal.
 //
 // Only Viary may call it: the client that owns VIARY_NAME on the session
 // bus. Other programs get AccessDenied, so apps on the bus cannot use the
@@ -13,6 +15,7 @@
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 
@@ -24,7 +27,7 @@ const OBJECT_PATH = '/app/viary/Shell';
 /** The name Viary's own connection owns: its calls are the ones answered. */
 const VIARY_NAME = 'app.viary.App';
 /** Bumped when the interface changes, so Viary can ask for an update. */
-const VERSION = 2;
+const VERSION = 3;
 
 /** Keys that would turn Ctrl+V into another shortcut while held: the talk
  *  shortcut's Alt can still be down when its Space comes up. Ctrl is not
@@ -34,10 +37,37 @@ const IN_THE_WAY = Clutter.ModifierType.SHIFT_MASK | Clutter.ModifierType.MOD1_M
     Clutter.ModifierType.SUPER_MASK | Clutter.ModifierType.META_MASK;
 /** How long to wait for those keys to come up, in ms. */
 const WAIT_FOR_KEYS = 1500;
+/** How often a held talk shortcut is checked for release, in ms. */
+const RELEASE_POLL = 15;
+
+/** The modifier masks an accelerator holds ("<Control><Alt>space"): while
+ *  all are down, the shortcut counts as held. The shell sees no key-up for
+ *  a grabbed key, so its modifiers coming up end it. */
+function modifiersOf(accelerator) {
+    const masks = {
+        control: Clutter.ModifierType.CONTROL_MASK,
+        primary: Clutter.ModifierType.CONTROL_MASK,
+        ctrl: Clutter.ModifierType.CONTROL_MASK,
+        alt: Clutter.ModifierType.MOD1_MASK,
+        shift: Clutter.ModifierType.SHIFT_MASK,
+        super: Clutter.ModifierType.MOD4_MASK,
+    };
+    let mods = 0;
+    for (const [, name] of accelerator.matchAll(/<(\w+)>/g))
+        mods |= masks[name.toLowerCase()] ?? 0;
+    return mods;
+}
 
 const INTERFACE = `
 <node>
   <interface name="app.viary.Shell">
+    <method name="BindTalk">
+      <arg type="s" direction="in" name="accelerator"/>
+      <arg type="b" direction="out" name="bound"/>
+    </method>
+    <signal name="Talk">
+      <arg type="b" name="down"/>
+    </signal>
     <method name="Paste"/>
     <method name="Undo"/>
     <method name="FocusedApp">
@@ -260,16 +290,28 @@ export default class ViaryExtension extends Extension {
         this._dbus.export(Gio.DBus.session, OBJECT_PATH);
         this._name = Gio.bus_own_name(Gio.BusType.SESSION, BUS_NAME, Gio.BusNameOwnerFlags.NONE, null, null, null);
         this._viary = null;
+        this._talk = null;
+        this._accelerator = global.display.connect('accelerator-activated', (_display, action) => {
+            if (action === this._talk?.action)
+                this._talkPressed();
+        });
         this._watch = Gio.bus_watch_name(Gio.BusType.SESSION, VIARY_NAME, Gio.BusNameWatcherFlags.NONE,
             (_connection, _name, owner) => {
                 this._viary = owner;
             },
             () => {
+                // Viary quit: the shortcut goes back to the apps.
                 this._viary = null;
+                this._ungrabTalk();
             });
     }
 
     disable() {
+        this._ungrabTalk();
+        if (this._accelerator) {
+            global.display.disconnect(this._accelerator);
+            this._accelerator = 0;
+        }
         if (this._watch) {
             Gio.bus_unwatch_name(this._watch);
             this._watch = 0;
@@ -320,6 +362,54 @@ export default class ViaryExtension extends Extension {
             });
     }
 
+    /** Grabs `accelerator` for Viary, in place of any it grabbed before;
+     *  false if another app or the shell has it. */
+    _grabTalk(accelerator) {
+        this._ungrabTalk();
+        const flags = Meta.KeyBindingFlags.IGNORE_AUTOREPEAT ?? Meta.KeyBindingFlags.NONE;
+        const action = global.display.grab_accelerator(accelerator, flags);
+        if (action === Meta.KeyBindingAction.NONE)
+            return false;
+        const name = Meta.external_binding_name_for_action(action);
+        Main.wm.allowKeybinding(name, Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW);
+        this._talk = {action, name, mods: modifiersOf(accelerator), held: 0};
+        return true;
+    }
+
+    _ungrabTalk() {
+        if (!this._talk)
+            return;
+        if (this._talk.held)
+            this._talkReleased();
+        global.display.ungrab_accelerator(this._talk.action);
+        Main.wm.allowKeybinding(this._talk.name, Shell.ActionMode.NONE);
+        this._talk = null;
+    }
+
+    /** The shortcut went down: reports it, then watches its modifiers for
+     *  the release. Pressed again while held (its modifiers kept down, as
+     *  for a double tap), it was let go in between. */
+    _talkPressed() {
+        const talk = this._talk;
+        if (talk.held)
+            this._talkReleased();
+        this._dbus?.emit_signal('Talk', new GLib.Variant('(b)', [true]));
+        talk.held = GLib.timeout_add(GLib.PRIORITY_DEFAULT, RELEASE_POLL, () => {
+            const [, , mods] = global.get_pointer();
+            if ((mods & talk.mods) === talk.mods)
+                return GLib.SOURCE_CONTINUE;
+            talk.held = 0;
+            this._dbus?.emit_signal('Talk', new GLib.Variant('(b)', [false]));
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _talkReleased() {
+        GLib.source_remove(this._talk.held);
+        this._talk.held = 0;
+        this._dbus?.emit_signal('Talk', new GLib.Variant('(b)', [false]));
+    }
+
     /** Presses `keyvals` in order, then releases them in reverse. */
     _press(keyvals) {
         const time = GLib.get_monotonic_time();
@@ -355,6 +445,13 @@ export default class ViaryExtension extends Extension {
 
     // Each method is the `Async` form, which gets the invocation and so
     // its sender.
+
+    BindTalkAsync([accelerator], invocation) {
+        this._fromViary(invocation, () => {
+            const bound = this._grabTalk(accelerator);
+            invocation.return_value(new GLib.Variant('(b)', [bound]));
+        });
+    }
 
     PasteAsync(_params, invocation) {
         this._fromViary(invocation, () =>
