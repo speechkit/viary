@@ -2,7 +2,7 @@
 // recent dictations.
 
 import { useEffect, useRef, useState } from "react";
-import { Icon, Kbd } from "../components/Icons";
+import { Icon, KeyCombo } from "../components/Icons";
 import { api, shortcutTrouble, useHistory, type Snapshot } from "../lib/ipc";
 import { isMac, PLATFORM, SYSTEM_SETTINGS, THIS_COMPUTER } from "../lib/platform";
 
@@ -31,16 +31,11 @@ function Step({ done, title, text, action }: { done: boolean; title: string; tex
   );
 }
 
-function Shortcut({ keys, title, text, soon = false }: { keys: string[]; title: string; text: string; soon?: boolean }) {
+/** `combo` as key caps, then `times` (a double tap) if more than once. */
+function Shortcut({ combo, times = 1, title, text, soon = false }: { combo: string; times?: number; title: string; text: string; soon?: boolean }) {
   return (
     <div className={"flex flex-col gap-2.5" + (soon ? " opacity-60" : "")}>
-      <div className="flex gap-1.5">
-        {keys.map((key, i) => (
-          <Kbd key={i} large>
-            {key}
-          </Kbd>
-        ))}
-      </div>
+      <KeyCombo combo={combo} large after={times > 1 && <span className="ml-1 text-[13px] font-medium text-muted">×{times}</span>} />
       <span className="flex items-center gap-2 text-[15px] font-semibold">
         {title}
         {soon && (
@@ -129,13 +124,9 @@ export function HomePage({ s, go }: { s: Snapshot; go: Go }) {
           </div>
         )}
         <div className={"grid grid-cols-3 gap-6 px-6 py-5" + (s.hotkeyActive ? "" : " opacity-60")}>
-          <Shortcut keys={[s.hotkeyName]} title="Hold to dictate" text="Release to insert where your cursor is." />
-          <Shortcut
-            keys={[s.hotkeyName, s.hotkeyName]}
-            title="Double-tap for hands-free"
-            text="Keeps listening until you tap again."
-          />
-          <Shortcut keys={[s.hotkeyName, isMac ? "⇧" : "Shift"]} title="Speak to edit" text="Select text, then say how to change it." soon />
+          <Shortcut combo={s.hotkeyName} title="Hold to dictate" text="Release to insert where your cursor is." />
+          <Shortcut combo={s.hotkeyName} times={2} title="Double-tap for hands-free" text="Keeps listening until you tap again." />
+          <Shortcut combo={`${s.hotkeyName}+${isMac ? "⇧" : "Shift"}`} title="Speak to edit" text="Select text, then say how to change it." soon />
         </div>
       </div>
 

@@ -120,11 +120,27 @@ export function Kbd({ children, large = false }: { children: React.ReactNode; la
   return (
     <span
       className={
-        "inline-flex items-center justify-center rounded-[6px] border border-stone border-b-2 bg-white font-mono " +
+        "inline-flex items-center justify-center whitespace-nowrap rounded-[6px] border border-stone border-b-2 bg-white font-mono " +
         (large ? "h-[30px] min-w-[30px] px-[9px] text-[13px] rounded-[8px] border-b-[3px]" : "h-[22px] min-w-6 px-1.5 text-[11px]")
       }
     >
       {children}
+    </span>
+  );
+}
+
+/** A shortcut as key caps, one per key: "Ctrl+Alt+Space" is three, then
+ *  `after` ("×2"). A narrow column wraps it between caps, never inside one. */
+export function KeyCombo({ combo, large = false, after }: { combo: string; large?: boolean; after?: React.ReactNode }) {
+  const keys = combo.split("+").map((key) => key.trim()).filter(Boolean);
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      {keys.map((key, i) => (
+        <Kbd key={i} large={large}>
+          {key}
+        </Kbd>
+      ))}
+      {after}
     </span>
   );
 }
