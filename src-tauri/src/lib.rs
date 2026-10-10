@@ -244,7 +244,7 @@ struct Microphone {
 
 #[tauri::command]
 fn list_microphones() -> CmdResult<Vec<Microphone>> {
-    Ok(speechkit::io::Microphone::list()
+    Ok(recording::Recording::microphones()
         .map_err(|e| engines::describe(&e))?
         .into_iter()
         .map(|d| Microphone {
@@ -1341,7 +1341,12 @@ fn another_launch(app: &AppHandle, args: &[String]) {
     }
     #[cfg(not(target_os = "linux"))]
     let _ = args;
-    match app.get_webview_window("setup") {
+    // Setup comes back while it is open or still to finish; a setup
+    // window kept hidden after that is not what opening Viary means.
+    let setup = app.get_webview_window("setup").filter(|setup| {
+        setup.is_visible().unwrap_or(false) || !app.state::<App>().settings().setup_done
+    });
+    match setup {
         Some(setup) => {
             let _ = setup.show();
             let _ = setup.unminimize();

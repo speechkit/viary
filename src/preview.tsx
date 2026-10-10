@@ -108,7 +108,8 @@ const snapshot: Snapshot = {
   },
   keys: { openAi: true, dashScope: false, customPolish: false },
   permissions: { accessibility: true, inputMonitoring: true },
-  hotkeyActive: true,
+  // On GNOME, the shortcut is live once GNOME hands it over; ?bound=1 starts there.
+  hotkeyActive: PLATFORM !== "linux" || params.get("bound") === "1",
   hotkeyName: HOTKEYS[PLATFORM].name,
   pill: { kind: "idle" },
   paused: null,
@@ -119,11 +120,11 @@ const snapshot: Snapshot = {
     PLATFORM === "linux"
       ? {
           session: "wayland",
-          shortcut: { mode: params.get("gnome") === "46" ? "toggle" : "hold", bound: false },
+          shortcut: { mode: params.get("gnome") === "46" ? "toggle" : "hold", bound: params.get("bound") === "1" },
           typing: "clipboard",
           portalAllowed: false,
-          // ?ext=installed or ?ext=active: the extension's other states.
-          extension: (params.get("ext") as "installed" | "active" | null) ?? "missing",
+          // ?ext=installed, active or updated: the extension's other states.
+          extension: (params.get("ext") as "installed" | "active" | "updated" | null) ?? "missing",
         }
       : null,
   families: [
@@ -566,6 +567,7 @@ mockIPC(
     if (cmd === "bind_shortcut" && snapshot.desktop) {
       await new Promise((r) => setTimeout(r, 600));
       snapshot.desktop.shortcut.bound = true;
+      snapshot.hotkeyActive = true;
       changed();
       return null;
     }

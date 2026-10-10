@@ -824,7 +824,7 @@ function TypingStep({ desktop }: { s: Snapshot; desktop: Desktop }) {
       <div role="radiogroup" aria-label="Typing method" className={boxed}>
         {TYPING.map((t) => {
           // The extension can be chosen once it runs: from the next login.
-          const waiting = t.id === "extension" && desktop.extension !== "active";
+          const waiting = t.id === "extension" && desktop.extension !== "active" && desktop.extension !== "updated";
           const on = !waiting && desktop.typing === t.id;
           return (
             <div key={t.id} className={row + " py-3.5"}>
@@ -854,7 +854,9 @@ function TypingStep({ desktop }: { s: Snapshot; desktop: Desktop }) {
                   <span className={sub}>
                     {t.id === "extension" && desktop.extension === "installed"
                       ? "Installed. Log out and back in, and GNOME starts it; then choose it here."
-                      : t.text}
+                      : t.id === "extension" && desktop.extension === "updated"
+                        ? `${t.text} Updated with Viary: the new version runs from your next login.`
+                        : t.text}
                   </span>
                 </span>
               </button>
@@ -1034,7 +1036,7 @@ export function Setup() {
         Back
       </button>
       <div className="flex gap-2">
-        {step === ENGINE && !ready(step, s) && (
+        {((step === ENGINE && !ready(step, s)) || asksGnome(step, s.desktop)) && (
           <button type="button" className={btn} onClick={() => setStep(step + 1)}>
             Skip for now
           </button>

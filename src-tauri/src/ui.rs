@@ -103,9 +103,14 @@ pub fn set_app_icon() {
 pub fn refresh(app: &AppHandle) {
     let _ = app.emit("state-changed", ());
     // An engine loading, a permission granted: the icon may change too,
-    // and on Linux the menu, which GNOME shows without asking first. On a
-    // thread of its own, so no caller's lock is held while they read the
-    // state, and once for a burst of changes.
+    // and on Linux the menu, which GNOME shows without asking first.
+    queue_tray(app);
+}
+
+/// Brings the icon and, on Linux, the menu up to date: on a thread of its
+/// own, so no caller's lock is held while they read the state, and once
+/// for a burst of changes.
+fn queue_tray(app: &AppHandle) {
     if !TRAY_PENDING.swap(true, Ordering::SeqCst) {
         let app = app.clone();
         std::thread::spawn(move || {
@@ -208,6 +213,7 @@ fn resolve(dictation: TrayState, paused: bool, loading: bool, attention: bool) -
 /// How a state is drawn: the mark's color, its dot, and whether it is
 /// struck through. On a dark bar (GNOME's, a dark taskbar or menu bar) the
 /// dots are lighter, as the design draws them.
+#[derive(PartialEq)]
 struct Look {
     ink: [u8; 3],
     badge: Option<[u8; 3]>,
@@ -306,6 +312,10 @@ pub fn tray_status(app: &AppHandle) -> (TrayState, String) {
 pub fn set_tray(app: &AppHandle, state: TrayState) {
     DICTATION.store(state as u8, Ordering::SeqCst);
     redraw_tray(app);
+    // The menu's first line says the state on Linux: "Listening".
+    if cfg!(target_os = "linux") {
+        queue_tray(app);
+    }
 }
 
 /// Draws the icon and its tooltip again if what they show changed.
@@ -315,23 +325,60 @@ pub fn redraw_tray(app: &AppHandle) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
+    if cfg!(target_os = "linux") && icon_settling(app) {
+        return;
+    }
     let (state, text) = tray_status(app);
-    {
+    let dark = dark_tray();
+    let drawn = {
         let mut shown = crate::lock(&SHOWN);
         if shown.as_ref().is_some_and(|(s, t)| *s == state && *t == text) {
             return;
         }
-        *shown = Some((state, text.clone()));
+        shown.replace((state, text.clone()))
+    };
+    let Look { ink, badge, struck, template } = look(state, dark);
+    // Linux shows no tooltip, and each icon is a file the shell reads:
+    // only a new look is written.
+    let same_look = drawn.is_some_and(|(drawn, _)| look(drawn, dark) == look(state, dark));
+    if !(cfg!(target_os = "linux") && same_look) {
+        let size = 44;
+        let _ = tray.set_icon(Some(Image::new_owned(
+            icons::tray(size, ink, badge, struck),
+            size,
+            size,
+        )));
+        *crate::lock(&ICON_SET) = Some(Instant::now());
     }
-    let Look { ink, badge, struck, template } = look(state, dark_tray());
-    let size = 44;
-    let _ = tray.set_icon(Some(Image::new_owned(
-        icons::tray(size, ink, badge, struck),
-        size,
-        size,
-    )));
     let _ = tray.set_icon_as_template(template);
     let _ = tray.set_tooltip(Some(format!("Viary: {text}")));
+}
+
+/// When the tray icon was last replaced.
+static ICON_SET: Mutex<Option<Instant>> = Mutex::new(None);
+/// How long the shell is given to read an icon before the next one.
+const ICON_SETTLES: Duration = Duration::from_millis(500);
+
+/// Whether the icon set moments ago is still to be read, so a new one
+/// waits; a redraw is queued for when it has been. On Linux each icon is
+/// written to a new file and the last one deleted at once: GNOME, reading
+/// it a moment later, finds it gone or half there and keeps the old icon,
+/// as at startup, where the state changes several times in a second.
+fn icon_settling(app: &AppHandle) -> bool {
+    static QUEUED: AtomicBool = AtomicBool::new(false);
+    let wait = crate::lock(&ICON_SET).map_or(Duration::ZERO, |at| ICON_SETTLES.saturating_sub(at.elapsed()));
+    if wait.is_zero() {
+        return false;
+    }
+    if !QUEUED.swap(true, Ordering::SeqCst) {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(wait);
+            QUEUED.store(false, Ordering::SeqCst);
+            redraw_tray(&app);
+        });
+    }
+    true
 }
 
 pub fn tray_icon() -> Image<'static> {

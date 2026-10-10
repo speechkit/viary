@@ -174,8 +174,10 @@ export interface Desktop {
   typing: Typing;
   /** GNOME already allowed typing through the RemoteDesktop portal. */
   portalAllowed: boolean;
-  /** Viary's GNOME Shell extension: runs only from the login after it is installed. */
-  extension: "missing" | "installed" | "active";
+  /** Viary's GNOME Shell extension: runs only from the login after it is
+   *  installed. `updated`: running, and a newer version, brought by this
+   *  Viary, runs from the next login. */
+  extension: "missing" | "installed" | "active" | "updated";
 }
 
 export interface Snapshot {
