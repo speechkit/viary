@@ -454,7 +454,7 @@ export const api = {
   setKeyTest: (on: boolean) => invoke<void>("set_key_test", { on }),
   /** Closes the setup window for good; Viary goes on in the tray. */
   finishSetup: () => invoke<void>("finish_setup"),
-  /** Starts or ends the microphone test, which sends `mic-level` events. */
+  /** Starts or ends the microphone test, which sends `mic-level` events, or `mic-error`. */
   micTest: (on: boolean) => invoke<void>("mic_test", { on }),
   /** Closes the first-launch tray tip; `showMe` opens the taskbar settings (Windows). */
   closeTrayTip: (showMe: boolean) => invoke<void>("close_tray_tip", { showMe }),
@@ -497,8 +497,11 @@ export function useMicLevel(microphone: string | null): { level: number; error: 
       setError("");
       api.micTest(true).catch((e) => setError(errorText(e)));
     };
-    start();
     const unlisten = listen<number>("mic-level", (e) => setLevel(e.payload));
+    // The microphone opens after the command returns: a failure comes as
+    // an event. Listened for before the test starts.
+    const unlistenError = listen<string>("mic-error", (e) => setError(e.payload));
+    start();
     // A hidden window keeps its page: the microphone is let go while the
     // window is closed or left, and taken again when it comes back.
     const unlistenFocus = getCurrentWebviewWindow().onFocusChanged(({ payload: focused }) => {
@@ -511,6 +514,7 @@ export function useMicLevel(microphone: string | null): { level: number; error: 
     });
     return () => {
       unlisten.then((stop) => stop());
+      unlistenError.then((stop) => stop());
       unlistenFocus.then((stop) => stop());
       api.micTest(false).catch(() => {});
     };
