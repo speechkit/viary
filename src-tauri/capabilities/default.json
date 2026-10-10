@@ -2,11 +2,13 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Viary's windows: the app commands, events, and the model folder picker.",
-  "windows": ["main", "pill", "popover"],
+  "windows": ["main", "pill", "popover", "setup", "tip"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
     "core:window:allow-set-size",
+    "core:window:allow-minimize",
+    "core:window:allow-hide",
     "dialog:allow-open",
     "dialog:allow-save"
   ]

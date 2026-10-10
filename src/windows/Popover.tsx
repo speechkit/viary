@@ -3,10 +3,11 @@
 
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Switch } from "../components/Controls";
-import { AppTile, Icon, Kbd } from "../components/Icons";
+import { AppTile, Icon, Kbd, KeyCombo } from "../components/Icons";
 import { api, engineName, useHistory, useSnapshot, type Language, type Snapshot } from "../lib/ipc";
+import { cmd, isMac, NEW_NOTE, shortcut } from "../lib/platform";
 
 const LANGUAGES: [Language, string][] = [
   ["auto", "Auto"],
@@ -39,10 +40,71 @@ function status(s: Snapshot): Status {
     case "failed":
       return { label: "Failed", tone: "attention", hint: "The audio is kept: retry from the pill" };
   }
+  if (s.paused) return { label: "Paused", tone: "off", hint: `${pausedFor(s.paused.until)}. ${s.hotkeyName} does nothing until then.` };
   if (s.engine.loading) return { label: "Loading", tone: "busy", hint: "The voice engine is loading" };
   if (!s.engine.active) return { label: "No engine", tone: "off", hint: "Choose a voice engine to transcribe" };
-  if (!s.hotkeyActive) return { label: "Almost ready", tone: "attention", hint: `Allow Input Monitoring to use ${s.hotkeyName}` };
+  if (!s.hotkeyActive) {
+    // Windows asks no permission: the keyboard hook could not be installed.
+    const hint = isMac ? `Allow Input Monitoring to use ${s.hotkeyName}` : `Viary can’t see the keyboard. Quit and open Viary again`;
+    return { label: isMac ? "Almost ready" : "Talk key off", tone: "attention", hint };
+  }
   return { label: "Ready", tone: "ok", hint: hold };
+}
+
+/** "Paused until 15:30", or "Paused until you resume". */
+function pausedFor(until: number | null): string {
+  if (until === null) return "Paused until you resume";
+  return `Paused until ${new Date(until).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+const PAUSES: [number | null, string][] = [
+  [15, "15 min"],
+  [60, "1 hour"],
+  [null, "Until I resume"],
+];
+
+/** Pause dictation for a while, or resume it. */
+function PauseRow({ s }: { s: Snapshot }) {
+  const [choosing, setChoosing] = useState(false);
+  const row = "flex min-h-10 w-full items-center justify-between px-3.5 text-sm";
+  if (s.paused) {
+    return (
+      <button type="button" onClick={() => api.resumeDictation()} className={row}>
+        <span className="flex items-center gap-2.5">
+          <Icon name="mic" />
+          Resume dictation
+        </span>
+        <span className="text-xs text-faint">{pausedFor(s.paused.until)}</span>
+      </button>
+    );
+  }
+  if (!choosing) {
+    return (
+      <button type="button" onClick={() => setChoosing(true)} className={row} aria-expanded={false}>
+        <span className="flex items-center gap-2.5">
+          <Icon name="pause" />
+          Pause dictation…
+        </span>
+      </button>
+    );
+  }
+  return (
+    <div role="group" aria-label="Pause dictation" className="flex min-h-10 items-center gap-1.5 px-3.5">
+      {PAUSES.map(([minutes, label]) => (
+        <button
+          key={label}
+          type="button"
+          onClick={() => {
+            setChoosing(false);
+            api.pauseDictation(minutes);
+          }}
+          className="h-7 rounded-md border border-edge bg-white px-2.5 text-xs font-medium"
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 function EngineBanner({ s }: { s: Snapshot }) {
@@ -115,8 +177,8 @@ export function Popover() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") api.hidePopover();
-      if (e.metaKey && e.key === ",") api.openMain("home");
-      if (e.metaKey && e.key.toLowerCase() === "q") api.quit();
+      if (cmd(e) && e.key === ",") api.openMain("home");
+      if (isMac && e.metaKey && e.key.toLowerCase() === "q") api.quit();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -142,7 +204,7 @@ export function Popover() {
                 className="inline-flex"
               >
                 <span aria-hidden="true">
-                  <Kbd>{s.hotkeyName}</Kbd>
+                  <KeyCombo combo={s.hotkeyName} />
                 </span>
               </span>
             </div>
@@ -156,7 +218,7 @@ export function Popover() {
               {state.label}
             </span>
           </div>
-          {!s.hotkeyActive && (
+          {!s.hotkeyActive && isMac && (
             <div className="mx-3.5 mb-3">
               <button
                 type="button"
@@ -255,7 +317,7 @@ export function Popover() {
                 <Icon name="notes" />
                 New voice note
               </span>
-              <Kbd>⌥⌘N</Kbd>
+              <Kbd>{NEW_NOTE}</Kbd>
             </button>
             <button
               type="button"
@@ -266,15 +328,16 @@ export function Popover() {
                 <Icon name="transcript" />
                 Transcribe a file…
               </span>
-              <span className="text-xs text-faint">or drop on icon</span>
+              {isMac && <span className="text-xs text-faint">or drop on icon</span>}
             </button>
           </div>
           <div className="border-t border-[#E8E3D8] py-1.5">
+            <PauseRow s={s} />
             <button type="button" onClick={() => api.openMain("home")} className="flex min-h-10 w-full items-center justify-between px-3.5 text-sm">
-              Open Viary <Kbd>⌘,</Kbd>
+              Open Viary <Kbd>{shortcut(["cmd"], ",")}</Kbd>
             </button>
             <button type="button" onClick={() => api.quit()} className="flex min-h-10 w-full items-center justify-between px-3.5 text-sm">
-              Quit <Kbd>⌘Q</Kbd>
+              Quit {isMac && <Kbd>⌘Q</Kbd>}
             </button>
           </div>
         </div>

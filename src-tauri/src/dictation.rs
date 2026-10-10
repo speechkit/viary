@@ -21,14 +21,15 @@ use speechkit::{
     AudioBuffer, SpeechError,
     asr::Transcript,
 };
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use crate::{
     App, dictionary,
     engines::{self, DASHSCOPE, EngineInfo, LoadedEngine, OPENAI, describe},
     history::{self, EngineLabel, Entry, Status},
     keychain::{self, Provider},
-    macos::{
+    platform::{
+        self,
         apps::{self, TargetApp},
         focus::{self, Focus},
         hotkey::HotkeyEvent,
@@ -38,6 +39,7 @@ use crate::{
     settings::{Hotkey, Settings},
     recording::Recording,
     ui::{self, TrayState},
+    voiced,
 };
 
 /// A key press shorter than this is a tap, not a dictation.
@@ -125,7 +127,8 @@ impl PillView {
     fn tray(&self) -> TrayState {
         match self {
             Self::Listening { .. } | Self::HandsFree { .. } => TrayState::Listening,
-            Self::Transcribing { .. } | Self::Polishing => TrayState::Working,
+            Self::Transcribing { .. } => TrayState::Transcribing,
+            Self::Polishing => TrayState::Polishing,
             Self::Failed { .. } => TrayState::Failed,
             _ => TrayState::Idle,
         }
@@ -166,12 +169,20 @@ pub enum Msg {
     Switched(u64, String, Result<EngineInfo, String>),
     /// A timed state ends: hide the pill if `token` is still current.
     Expire(u64),
+    /// Start listening hands-free, as a double tap does: from the tray menu.
+    #[cfg_attr(target_os = "macos", expect(dead_code, reason = "macOS has no tray menu"))]
+    StartHandsFree,
+    /// Type the newest dictation into the app in front again.
+    #[cfg_attr(target_os = "macos", expect(dead_code, reason = "macOS has no tray menu"))]
+    PasteLast,
 }
 
 /// A recognition result.
 pub struct Transcribed {
     result: Result<Transcript, SpeechError>,
     audio: Arc<AudioBuffer>,
+    /// Where `audio` starts on the segments' clock.
+    origin: Duration,
     engine: Option<Arc<LoadedEngine>>,
 }
 
@@ -309,6 +320,8 @@ impl Controller {
                 Msg::Switched(token, id, outcome) if token == self.token => {
                     self.switched(id, outcome)
                 }
+                Msg::StartHandsFree => self.start_hands_free(),
+                Msg::PasteLast => self.paste_last(),
                 Msg::Expire(token) if token == self.token => {
                     if matches!(self.phase, Phase::Inserted(_) | Phase::Notice) {
                         self.phase = Phase::Idle;
@@ -384,6 +397,10 @@ impl Controller {
             }
             phase => self.phase = phase,
         }
+        if self.state().pause.get().is_some() {
+            self.hint("Dictation is paused");
+            return;
+        }
         let token = self.next_token();
         let settings = self.settings();
         let Some(engine) = self.state().engines.current() else {
@@ -412,9 +429,9 @@ impl Controller {
             &engine.engine,
             options,
             move |level, text, closed| {
-                let _ = app.emit_to("pill", "pill-level", level);
+                ui::pill_level(&app, level);
                 if let Some(text) = text {
-                    let _ = app.emit_to("pill", "pill-partial", (token, text));
+                    ui::pill_partial(&app, token, text);
                 }
                 if closed {
                     let _ = mailbox.send(Msg::Closed(token));
@@ -492,6 +509,46 @@ impl Controller {
         }
     }
 
+    /// Starts a hands-free dictation without the key.
+    fn start_hands_free(&mut self) {
+        if matches!(self.phase, Phase::Listening(_) | Phase::Tapped(..)) {
+            return;
+        }
+        self.key_down(Instant::now());
+        if matches!(&self.phase, Phase::Listening(listening) if !listening.hands_free) {
+            self.hands_free();
+        }
+    }
+
+    fn paste_last(&mut self) {
+        // A dictation under way keeps the pill, and its text goes in when
+        // it ends: a paste now would land in the middle of it.
+        if matches!(
+            self.phase,
+            Phase::Listening(_) | Phase::Tapped(..) | Phase::Busy(_) | Phase::Polishing(_)
+        ) {
+            tracing::debug!("paste last: a dictation is under way");
+            return;
+        }
+        let last = self.state().history.list().into_iter().find(|e| !e.text.is_empty());
+        let Some(entry) = last else {
+            self.hint("Nothing dictated yet");
+            return;
+        };
+        let target = apps::frontmost().unwrap_or_default();
+        match deliver(&self.app, &entry.text, &target) {
+            Delivery::Copied { label, .. } => self.hint(label),
+            // The pill's Undo would now take back this paste, not the
+            // insertion it shows.
+            Delivery::Pasted if matches!(self.phase, Phase::Inserted(_)) => {
+                self.next_token();
+                self.phase = Phase::Idle;
+                self.show(PillView::Idle);
+            }
+            Delivery::Pasted => {}
+        }
+    }
+
     /// Keeps listening after a double tap until the next press, Stop, the
     /// session closing, or the limit.
     fn hands_free(&mut self) {
@@ -543,6 +600,7 @@ impl Controller {
         } = *listening;
         let deadline = finish_deadline(started.elapsed());
         recording.stop();
+        let origin = recording.origin();
         let token = self.token;
         self.show(PillView::Transcribing {
             label: transcribing_label(&engine.info),
@@ -566,6 +624,7 @@ impl Controller {
                 Transcribed {
                     result,
                     audio,
+                    origin,
                     engine,
                 },
             ));
@@ -583,6 +642,8 @@ impl Controller {
         let info = done.engine.as_ref().map(|e| e.info.clone());
         match done.result {
             Ok(transcript) => {
+                // Room noise the engine wrote words for is not inserted.
+                let transcript = voiced::keep_heard(transcript, &done.audio, done.origin);
                 let raw = transcript.text();
                 if raw.trim().is_empty() {
                     if job.history_id.is_some() {
@@ -796,8 +857,9 @@ impl Controller {
                 if !refocus(&inserted.target) {
                     // ⌘Z would undo something in whichever app is in front.
                     self.hint(format!(
-                        "{} · undo there with ⌘Z",
-                        not_returned(&inserted.target)
+                        "{} · undo there with {}",
+                        not_returned(&inserted.target),
+                        platform::UNDO_KEY
                     ));
                 } else if action == PillAction::Undo {
                     self.undo(&inserted);
@@ -929,6 +991,7 @@ impl Controller {
                 Transcribed {
                     result,
                     audio,
+                    origin: Duration::ZERO,
                     engine,
                 },
             ));
@@ -954,6 +1017,11 @@ fn refocus(target: &TargetApp) -> bool {
     target.is_self() || apps::activate(target)
 }
 
+/// The app's name, or "The app" when unknown.
+fn app_name(target: &TargetApp) -> &str {
+    if target.name.is_empty() { "The app" } else { &target.name }
+}
+
 /// "Could not return to Notes", for when `target` did not come back.
 fn not_returned(target: &TargetApp) -> String {
     if target.name.is_empty() {
@@ -963,30 +1031,38 @@ fn not_returned(target: &TargetApp) -> String {
     }
 }
 
-/// Pastes `text` into `target`'s focused field with ⌘V, then restores the
+/// Pastes `text` into `target`'s focused field with ⌘V (Ctrl+V elsewhere),
+/// then restores the
 /// clipboard. Without a text field, without permission to type into other
 /// apps, or when `target` cannot be brought back to the front, the text
 /// stays on the clipboard instead: a paste would land in another app.
 fn deliver(app: &AppHandle, text: &str, target: &TargetApp) -> Delivery {
-    if !permissions::accessibility() {
+    if !permissions::can_type() {
         pasteboard::set_text(text);
         return Delivery::Copied {
             label: "Copied to clipboard".into(),
-            hint: "Allow Accessibility to paste".into(),
+            hint: permissions::ALLOW_TYPING.into(),
         };
     }
     if !refocus(target) {
         pasteboard::set_text(text);
         return Delivery::Copied {
             label: format!("{} · copied to clipboard", not_returned(target)),
-            hint: "⌘V to paste".into(),
+            hint: platform::PASTE_HINT.into(),
+        };
+    }
+    if apps::is_protected(target) {
+        pasteboard::set_text(text);
+        return Delivery::Copied {
+            label: format!("{} runs as administrator · copied to clipboard", app_name(target)),
+            hint: platform::PASTE_HINT.into(),
         };
     }
     if focus::focused(target.pid) == Focus::NotEditable {
         pasteboard::set_text(text);
         return Delivery::Copied {
             label: "No text field focused · copied to clipboard".into(),
-            hint: "⌘V to paste".into(),
+            hint: platform::PASTE_HINT.into(),
         };
     }
     let saved = pasteboard::save();
@@ -998,7 +1074,7 @@ fn deliver(app: &AppHandle, text: &str, target: &TargetApp) -> Delivery {
         pasteboard::set_text(text);
         return Delivery::Copied {
             label: "Copied to clipboard".into(),
-            hint: "⌘V to paste".into(),
+            hint: platform::PASTE_HINT.into(),
         };
     }
     // Let the app read the pasteboard before putting the user's back.
@@ -1099,7 +1175,7 @@ fn failure_message(error: &SpeechError, info: Option<&EngineInfo>) -> (String, b
     (message.into(), retryable)
 }
 
-fn cloud_ready(settings: &Settings, id: &str) -> bool {
+pub fn cloud_ready(settings: &Settings, id: &str) -> bool {
     match id {
         OPENAI => !settings.openai.model.trim().is_empty() && keychain::has(Provider::OpenAi),
         DASHSCOPE => {
@@ -1144,7 +1220,7 @@ fn alternative(
     Some((id, label))
 }
 
-fn engine_name(settings: &Settings, id: &str) -> String {
+pub fn engine_name(settings: &Settings, id: &str) -> String {
     match id {
         OPENAI => "OpenAI".into(),
         DASHSCOPE => "DashScope".into(),
@@ -1160,6 +1236,9 @@ pub fn key_name(hotkey: Hotkey) -> &'static str {
         Hotkey::Fn => "fn",
         Hotkey::RightOption => "right ⌥",
         Hotkey::RightCommand => "right ⌘",
+        Hotkey::RightAlt => "Right Alt",
+        Hotkey::CtrlWin => "Ctrl + Win",
+        Hotkey::Shortcut => "Ctrl+Alt+Space",
     }
 }
 

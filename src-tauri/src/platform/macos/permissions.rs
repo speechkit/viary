@@ -40,10 +40,14 @@ pub fn check() -> Permissions {
     }
 }
 
-pub fn accessibility() -> bool {
+/// Whether Viary may post ⌘V to other apps: Accessibility.
+pub fn can_type() -> bool {
     // SAFETY: reads TCC state.
     unsafe { AXIsProcessTrusted() }
 }
+
+/// What to allow when [`can_type`] is false.
+pub const ALLOW_TYPING: &str = "Allow Accessibility to paste";
 
 /// Shows the system prompt for `kind`, which adds Viary to the list in
 /// System Settings.
@@ -74,5 +78,16 @@ pub fn open_settings(kind: &str) {
     let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
     if let Err(error) = std::process::Command::new("open").arg(url).status() {
         tracing::warn!(%error, "cannot open System Settings");
+    }
+}
+
+/// What is missing for dictation, for the menu bar icon, if anything.
+pub fn missing(hotkey_active: bool) -> Option<&'static str> {
+    if !hotkey_active {
+        Some("allow Input Monitoring")
+    } else if !can_type() {
+        Some("allow Accessibility to paste")
+    } else {
+        None
     }
 }

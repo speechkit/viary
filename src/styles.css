@@ -67,13 +67,21 @@ body {
 }
 
 /* The main window is paper; the pill and the popover float on nothing. */
-html[data-window="main"] body {
+/* The setup window's content fills it; its title bar is drawn in the page. */
+html[data-window="setup"] #root {
+  height: 100vh;
+}
+
+html[data-window="main"] body,
+html[data-window="setup"] body {
   background: var(--color-paper);
 }
 html[data-window="pill"],
 html[data-window="pill"] body,
 html[data-window="popover"],
-html[data-window="popover"] body {
+html[data-window="popover"] body,
+html[data-window="tip"],
+html[data-window="tip"] body {
   background: transparent;
   overflow: hidden;
 }

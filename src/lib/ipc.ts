@@ -2,9 +2,11 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCallback, useEffect, useState } from "react";
+import type { Platform } from "./platform";
 
-export type Hotkey = "fn" | "rightOption" | "rightCommand";
+export type Hotkey = "fn" | "rightOption" | "rightCommand" | "rightAlt" | "ctrlWin" | "shortcut";
 export type Language = "auto" | "en" | "zh";
 export type Provider = "openAi" | "dashScope" | "customPolish";
 
@@ -163,15 +165,47 @@ export interface SpeechCaps {
   mock: boolean;
 }
 
+export interface Desktop {
+  session: "wayland" | "x11";
+  /** Viary's GNOME Shell extension, which hears the talk shortcut, types,
+   *  and draws the pill on Wayland: runs only from the login after it is
+   *  installed. `updated`: running, and a newer version, brought by this
+   *  Viary, runs from the next login. */
+  extension: "missing" | "installed" | "active" | "updated";
+}
+
+/** Why the talk shortcut does nothing on Linux, or null if it works (or
+ *  elsewhere). On Wayland only Viary's extension can hear it. */
+export function shortcutTrouble(s: Snapshot): string | null {
+  const desktop = s.desktop;
+  if (s.hotkeyActive || !desktop) return null;
+  if (desktop.session === "wayland") {
+    if (desktop.extension === "missing") return "Viary’s GNOME Shell extension isn’t installed.";
+    if (desktop.extension === "installed") return "Log out and back in, and GNOME starts Viary’s extension.";
+    if (desktop.extension === "updated") return "Log out and back in to start the updated extension.";
+  }
+  return `Another app holds ${s.hotkeyName}.`;
+}
+
 export interface Snapshot {
+  platform: Platform;
   settings: Settings;
   speechCaps: SpeechCaps;
   engine: EngineStatus;
   keys: { openAi: boolean; dashScope: boolean; customPolish: boolean };
-  permissions: { accessibility: boolean; inputMonitoring: boolean };
+  /** Windows reports the microphone switch; macOS asks when recording starts. */
+  permissions: { accessibility: boolean; inputMonitoring: boolean; microphone?: boolean };
   hotkeyActive: boolean;
   hotkeyName: string;
   pill: PillView;
+  /** Dictation paused from the tray, until a time (ms since the epoch) or until resumed. */
+  paused: { until: number | null } | null;
+  /** Viary starts when the user signs in. */
+  autostart: boolean;
+  /** The GNOME session and Viary's extension on Linux; null elsewhere. */
+  desktop: Desktop | null;
+  /** The keyboard layout on Windows: whether Right Alt is AltGr. Null elsewhere. */
+  keyboard: { altGr: boolean } | null;
   families: [string, FamilyInfo][];
   punctLayout: string | null;
 }
@@ -380,7 +414,7 @@ export const api = {
   copy: (text: string) => invoke<void>("copy_text", { text }),
   pill: (action: PillAction) => invoke<void>("pill_action", { action }),
   fitPill: (width: number, height: number) => invoke<void>("fit_pill", { width, height }),
-  requestPermission: (kind: "accessibility" | "inputMonitoring" | "microphone") =>
+  requestPermission: (kind: "accessibility" | "inputMonitoring" | "microphone" | "taskbar") =>
     invoke<void>("request_permission", { kind }),
   openMain: (page: string) => invoke<void>("open_main", { page }),
   /** Opens Voice Notes and starts a recording, as ⌥⌘N does. */
@@ -421,6 +455,20 @@ export const api = {
   /** File extensions speechkit decodes in this build, for the file dialog. */
   audioExtensions: () => invoke<string[]>("audio_extensions"),
   hidePopover: () => invoke<void>("hide_popover"),
+  /** Pauses dictation for `minutes`, or until resumed. */
+  pauseDictation: (minutes: number | null) => invoke<void>("pause_dictation", { minutes }),
+  resumeDictation: () => invoke<void>("resume_dictation"),
+  setAutostart: (on: boolean) => invoke<void>("set_autostart", { on }),
+  /** While on, the talk key only reports itself (`hotkey` events) and starts no dictation. */
+  setKeyTest: (on: boolean) => invoke<void>("set_key_test", { on }),
+  /** Closes the setup window for good; Viary goes on in the tray. */
+  finishSetup: () => invoke<void>("finish_setup"),
+  /** Starts or ends the microphone test, which sends `mic-level` events, or `mic-error`. */
+  micTest: (on: boolean) => invoke<void>("mic_test", { on }),
+  /** Closes the first-launch tray tip; `showMe` opens the taskbar settings (Windows). */
+  closeTrayTip: (showMe: boolean) => invoke<void>("close_tray_tip", { showMe }),
+  /** Installs Viary's GNOME Shell extension; it runs from the next login (Linux). */
+  installExtension: () => invoke<void>("install_extension"),
   quit: () => invoke<void>("quit"),
 };
 
@@ -443,6 +491,65 @@ function useRefreshing<T>(fetch: () => Promise<T>): [T | null, () => void] {
 }
 
 export const useSnapshot = () => useRefreshing(api.state);
+
+/** The microphone's level, 0 to 1, while the test runs: started on mount,
+ *  ended on unmount, and restarted when `microphone` changes. */
+export function useMicLevel(microphone: string | null): { level: number; error: string } {
+  const [level, setLevel] = useState(0);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const start = () => {
+      setError("");
+      api.micTest(true).catch((e) => setError(errorText(e)));
+    };
+    const unlisten = listen<number>("mic-level", (e) => setLevel(e.payload));
+    // The microphone opens after the command returns: a failure comes as
+    // an event. Listened for before the test starts.
+    const unlistenError = listen<string>("mic-error", (e) => setError(e.payload));
+    start();
+    // A hidden window keeps its page: the microphone is let go while the
+    // window is closed or left, and taken again when it comes back.
+    const unlistenFocus = getCurrentWebviewWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused) {
+        start();
+      } else {
+        api.micTest(false).catch(() => {});
+        setLevel(0);
+      }
+    });
+    return () => {
+      unlisten.then((stop) => stop());
+      unlistenError.then((stop) => stop());
+      unlistenFocus.then((stop) => stop());
+      api.micTest(false).catch(() => {});
+    };
+  }, [microphone]);
+  return { level, error };
+}
+
+/** What the pill shows, as it changes: for windows that report a
+ *  dictation's progress without being the pill. */
+export function usePillView(): PillView {
+  const [view, setView] = useState<PillView>({ kind: "idle" });
+  useEffect(() => {
+    api.state().then((s) => setView(s.pill), console.error);
+    const unlisten = listen<PillView>("pill-state", (e) => setView(e.payload));
+    return () => {
+      unlisten.then((stop) => stop());
+    };
+  }, []);
+  return view;
+}
+
+/** Calls `onKey` as the talk key goes down and up. */
+export function useHotkey(onKey: (down: boolean) => void) {
+  useEffect(() => {
+    const unlisten = listen<"down" | "up">("hotkey", (e) => onKey(e.payload === "down"));
+    return () => {
+      unlisten.then((stop) => stop());
+    };
+  }, [onKey]);
+}
 export const useHistory = () => useRefreshing(api.history);
 
 /** Calls `fetch` now and on `event` (and window focus, with `onFocus`),
@@ -530,9 +637,51 @@ export function knownApps(history: HistoryItem[] | null): string[] {
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([app]) => app);
 }
 
+/** An app name's words, lowercased, without punctuation. */
+function appWords(name: string): string[] {
+  return name.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+}
+
+/**
+ * Whether `entered`, an app as the user named it, names `app`, as the system
+ * reports it: its words, in order, among the app's ("Outlook" names
+ * "Microsoft Outlook"; "Mail" does not name "Mailspring"). The rank puts an
+ * exact name first, then more words. As settings.rs `app_match` decides it.
+ */
+export function appMatch(entered: string, app: string): [exact: number, words: number] | null {
+  const wanted = appWords(entered);
+  const words = appWords(app);
+  if (!wanted.length) return null;
+  for (let i = 0; i + wanted.length <= words.length; i++) {
+    if (wanted.every((w, j) => words[i + j] === w)) return [wanted.length === words.length ? 1 : 0, wanted.length];
+  }
+  return null;
+}
+
+/** Of `entries` (app names as the user wrote them), the one that applies
+ *  in `app`: the best ranked of those that match it, the first listed of
+ *  equals, as settings.rs `tone_in` picks. */
+export function bestEntry(entries: string[], app: string): string | null {
+  let best: { rank: [number, number]; entry: string } | null = null;
+  for (const entry of entries) {
+    const rank = appMatch(entry, app);
+    if (rank && (!best || rank[0] > best.rank[0] || (rank[0] === best.rank[0] && rank[1] > best.rank[1]))) {
+      best = { rank, entry };
+    }
+  }
+  return best?.entry ?? null;
+}
+
+/** Apps seen in History that `entry` covers under another name ("Outlook"
+ *  covers "Microsoft Outlook"), where no entry in `entries` matches better. */
+export function alsoIn(entry: string, entries: string[], seen: string[]): string[] {
+  return seen.filter((app) => app.toLowerCase() !== entry.toLowerCase() && bestEntry(entries, app) === entry);
+}
+
 /** The polish tone that applies in `app`, as the backend decides it. */
 export function toneIn(polish: PolishSettings, app: string): Tone {
-  const own = polish.tones.find((t) => t.app.toLowerCase() === app.toLowerCase())?.tone ?? polish.defaultTone;
+  const best = bestEntry(polish.tones.map((t) => t.app), app);
+  const own = polish.tones.find((t) => t.app === best)?.tone ?? polish.defaultTone;
   if (own === "literal") return "literal";
   return polish.appTone ? own : "asSpoken";
 }

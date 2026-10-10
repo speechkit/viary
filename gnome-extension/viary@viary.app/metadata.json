@@ -1,0 +1,8 @@
+{
+  "uuid": "viary@viary.app",
+  "name": "Viary",
+  "description": "Lets Viary hear its talk shortcut, type what you dictate into any app, and show its dictation pill at the bottom of the screen.",
+  "shell-version": ["46", "47", "48", "49", "50"],
+  "url": "https://github.com/speechkit/viary",
+  "version": 3
+}

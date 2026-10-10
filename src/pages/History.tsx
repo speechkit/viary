@@ -374,7 +374,9 @@ export function HistoryPage({ s, focus }: { s: Snapshot; focus: string | null })
       {current ? (
         <Detail key={current.id} item={current} s={s} />
       ) : (
-        <main className="flex grow items-center justify-center text-sm text-muted">Hold {s.hotkeyName} and speak to make your first dictation.</main>
+        <main className="flex grow items-center justify-center text-sm text-muted">
+          {`Hold ${s.hotkeyName} and speak to make your first dictation.`}
+        </main>
       )}
     </div>
   );

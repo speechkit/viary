@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libasound2-dev libdbus-1-dev libxdo-dev
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Type-checks the web views and writes dist/, which the Rust build embeds.
+      - run: npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          # One cache per runner image: Linux x64 alone would share Ubuntu
+          # 24.04's with 26.04.
+          key: ${{ matrix.os }}
+      # sherpa-onnx-sys trusts an unpacked library folder that exists, and a
+      # restored cache can hold the folder without the library in it (the
+      # cache prunes target/). Unpacked again from the kept download, or
+      # downloaded again.
+      - name: Unpack sherpa-onnx afresh
+        shell: bash
+        run: find src-tauri/target/sherpa-onnx-prebuilt -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        working-directory: src-tauri
+        run: cargo test
+
+      # A headless GNOME Shell on Wayland, as Ubuntu 26.04 runs it, with
+      # Viary's extension and the desktop portals.
+      - name: GNOME packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y gnome-shell mutter xwayland dbus-daemon dconf-service \
+            xdg-desktop-portal xdg-desktop-portal-gnome libgl1-mesa-dri
+      - name: GNOME on Wayland
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: dbus-run-session -- ci/gnome-wayland.sh

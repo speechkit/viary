@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { btn, btnDanger, btnPrimary, ErrorBanner, Field, input, Select, Switch, useDraft } from "../components/Controls";
 import { Icon } from "../components/Icons";
 import {
+  alsoIn,
   api,
   errorText,
   knownApps,
@@ -16,6 +17,7 @@ import {
   type Snapshot,
   type Tone,
 } from "../lib/ipc";
+import { KEY_STORE, THIS_COMPUTER } from "../lib/platform";
 
 const TONES: { value: Tone; label: string }[] = [
   { value: "formal", label: "Formal" },
@@ -96,7 +98,7 @@ function destination(baseUrl: string): string {
     const host = url.hostname.toLowerCase();
     const local = host === "localhost" || host === "localhost." || host === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(host);
     return local
-      ? "Transcripts are sent to a local server on this Mac."
+      ? `Transcripts are sent to a local server on ${THIS_COMPUTER}.`
       : `Transcripts are sent to ${url.host}. Audio is not sent for polishing.`;
   } catch {
     return "Enter a valid server base URL.";
@@ -220,7 +222,7 @@ function ModelCard({ s, onError }: { s: Snapshot; onError: (e: string) => void }
               />
             </Field>
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-              <span className="grow">{s.keys.customPolish ? "API key stored in Keychain. Leave blank to keep it." : "Saved keys are stored in the macOS Keychain."}</span>
+              <span className="grow">{s.keys.customPolish ? `API key stored in ${KEY_STORE}. Leave blank to keep it.` : `Saved keys are stored in ${KEY_STORE}.`}</span>
               {s.keys.customPolish && (
                 <button type="button" className={btnDanger} onClick={removeKey}>Remove key</button>
               )}
@@ -306,7 +308,8 @@ function TonesCard({ s, onError }: { s: Snapshot; onError: (e: string) => void }
   const [adding, setAdding] = useState(false);
   const polish = s.settings.polish;
   const listed = polish.tones.map((t) => t.app);
-  const suggestions = knownApps(history).filter((app) => !listed.includes(app));
+  const seen = knownApps(history);
+  const suggestions = seen.filter((app) => !listed.includes(app));
   const setTone = (app: string, tone: Tone | null) => api.setAppTone(app, tone).catch((e) => onError(errorText(e)));
   const dim = !polish.enabled ? "opacity-50" : "";
   return (
@@ -330,21 +333,31 @@ function TonesCard({ s, onError }: { s: Snapshot; onError: (e: string) => void }
         />
       )}
       <div className={dim}>
-        {polish.tones.map(({ app, tone }) => (
-          <div key={app} className="group flex items-center gap-3 border-b border-hair px-5 py-2.5">
-            <AppTile app={app} />
-            <span className="min-w-0 grow truncate text-sm">{app}</span>
-            <Select label={`${app} tone`} value={tone} options={TONES} onChange={(t) => setTone(app, t)} />
-            <button
-              type="button"
-              aria-label={`Remove ${app}`}
-              className="text-faint opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover:text-rust"
-              onClick={() => setTone(app, null)}
-            >
-              <Icon name="close" size={14} />
-            </button>
-          </div>
-        ))}
+        {polish.tones.map(({ app, tone }) => {
+          const also = alsoIn(app, listed, seen).join(", ");
+          return (
+            <div key={app} className="group flex items-center gap-3 border-b border-hair px-5 py-2.5">
+              <AppTile app={app} />
+              <span className="flex min-w-0 grow flex-col">
+                <span className="truncate text-sm">{app}</span>
+                {also && (
+                  <span className="truncate text-xs text-faint" title={also}>
+                    Also in {also}
+                  </span>
+                )}
+              </span>
+              <Select label={`${app} tone`} value={tone} options={TONES} onChange={(t) => setTone(app, t)} />
+              <button
+                type="button"
+                aria-label={`Remove ${app}`}
+                className="text-faint opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover:text-rust"
+                onClick={() => setTone(app, null)}
+              >
+                <Icon name="close" size={14} />
+              </button>
+            </div>
+          );
+        })}
         <div className="flex items-center gap-3 px-5 py-2.5">
           <span aria-hidden="true" className="flex size-7 shrink-0 items-center justify-center rounded-[7px] border border-dashed border-stone text-faint">
             <Icon name="plus" size={12} />

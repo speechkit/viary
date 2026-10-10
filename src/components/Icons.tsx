@@ -68,6 +68,8 @@ const paths = {
   transcript: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M8 13h8M8 17h5",
   fileAdd: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M12 11v6M9 14h6",
   back: "M15 6l-6 6 6 6",
+  chevronUp: "M6 15l6-6 6 6",
+  minus: "M7 12h10",
   upload: "M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",
   back15: "M4 12a8 8 0 1 0 3-6.2M4 4v5h5",
   fwd15: "M20 12a8 8 0 1 1-3-6.2M20 4v5h-5",
@@ -118,11 +120,27 @@ export function Kbd({ children, large = false }: { children: React.ReactNode; la
   return (
     <span
       className={
-        "inline-flex items-center justify-center rounded-[6px] border border-stone border-b-2 bg-white font-mono " +
+        "inline-flex items-center justify-center whitespace-nowrap rounded-[6px] border border-stone border-b-2 bg-white font-mono " +
         (large ? "h-[30px] min-w-[30px] px-[9px] text-[13px] rounded-[8px] border-b-[3px]" : "h-[22px] min-w-6 px-1.5 text-[11px]")
       }
     >
       {children}
+    </span>
+  );
+}
+
+/** A shortcut as key caps, one per key: "Ctrl+Alt+Space" is three, then
+ *  `after` ("×2"). A narrow column wraps it between caps, never inside one. */
+export function KeyCombo({ combo, large = false, after }: { combo: string; large?: boolean; after?: React.ReactNode }) {
+  const keys = combo.split("+").map((key) => key.trim()).filter(Boolean);
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      {keys.map((key, i) => (
+        <Kbd key={i} large={large}>
+          {key}
+        </Kbd>
+      ))}
+      {after}
     </span>
   );
 }

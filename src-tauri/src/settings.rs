@@ -10,14 +10,47 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-/// The key that starts a dictation while held.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// The key that starts a dictation while held. Each system offers its own:
+/// fn, right ⌥, and right ⌘ on macOS; Right Alt and Ctrl + Win on Windows;
+/// on Linux, a shortcut the desktop hands to Viary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Hotkey {
-    #[default]
     Fn,
     RightOption,
     RightCommand,
+    RightAlt,
+    CtrlWin,
+    Shortcut,
+}
+
+impl Hotkey {
+    /// The keys this system's listener can hear.
+    pub const AVAILABLE: &'static [Self] = if cfg!(target_os = "macos") {
+        &[Self::Fn, Self::RightOption, Self::RightCommand]
+    } else if cfg!(target_os = "windows") {
+        &[Self::RightAlt, Self::CtrlWin]
+    } else {
+        &[Self::Shortcut]
+    };
+
+    /// This key, or the system's default where the listener cannot hear
+    /// it: settings copied from another system.
+    pub fn here(self) -> Self {
+        if Self::AVAILABLE.contains(&self) { self } else { Self::default() }
+    }
+}
+
+impl Default for Hotkey {
+    fn default() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Fn
+        } else if cfg!(target_os = "windows") {
+            Self::RightAlt
+        } else {
+            Self::Shortcut
+        }
+    }
 }
 
 /// The spoken language passed to engines that accept an override.
@@ -157,8 +190,32 @@ impl Default for DictionaryEntry {
 impl DictionaryEntry {
     /// Whether it applies in the app named `app`.
     pub fn applies_in(&self, app: &str) -> bool {
-        self.apps.is_empty() || self.apps.iter().any(|a| a.eq_ignore_ascii_case(app))
+        self.apps.is_empty() || self.apps.iter().any(|a| app_match(a, app).is_some())
     }
+}
+
+/// An app name's words, lowercased, without punctuation:
+/// "gnome-text-editor" is `["gnome", "text", "editor"]`.
+fn app_words(name: &str) -> Vec<String> {
+    name.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether `entered`, an app as the user named it, names `app`, as the
+/// system reports it: its words, in order, among the app's, ignoring case
+/// and punctuation. Systems name the same app differently ("Mail", "Microsoft
+/// Outlook", "gnome-text-editor"), so "Outlook" matches "Microsoft Outlook",
+/// while "Mail" does not match "Mailspring". `Some` ranks the match: exact
+/// first, then the one with more words, so the most specific entry wins.
+pub fn app_match(entered: &str, app: &str) -> Option<(bool, usize)> {
+    let wanted = app_words(entered);
+    let words = app_words(app);
+    if wanted.is_empty() || !words.windows(wanted.len()).any(|w| w == wanted.as_slice()) {
+        return None;
+    }
+    Some((wanted.len() == words.len(), wanted.len()))
 }
 
 /// How polished text should read in an app.
@@ -240,10 +297,14 @@ impl Default for PolishSettings {
 impl PolishSettings {
     /// The tone set for the app named `app`.
     pub fn tone_in(&self, app: &str) -> Tone {
+        // Reversed, so of equally ranked tones the first listed wins:
+        // `max_by_key` keeps the last of equals. The web views pick alike.
         self.tones
             .iter()
-            .find(|t| t.app.eq_ignore_ascii_case(app))
-            .map_or(self.default_tone, |t| t.tone)
+            .rev()
+            .filter_map(|t| Some((app_match(&t.app, app)?, t.tone)))
+            .max_by_key(|(rank, _)| *rank)
+            .map_or(self.default_tone, |(_, tone)| tone)
     }
 
     /// These settings with the fields in `patch` changed, as the web views
@@ -391,6 +452,10 @@ pub struct Settings {
     pub microphone: Option<String>,
     pub language: Language,
     pub hotkey: Hotkey,
+    /// The setup window ran to its end (Windows).
+    pub setup_done: bool,
+    /// The tip saying where the tray icon went was shown (Windows).
+    pub tray_tip_shown: bool,
     /// 0 keeps no recordings.
     pub keep_recordings_days: u32,
     pub openai: OpenAiSettings,
@@ -411,7 +476,9 @@ impl Default for Settings {
             threads: 2,
             microphone: None,
             language: Language::Auto,
-            hotkey: Hotkey::Fn,
+            hotkey: Hotkey::default(),
+            setup_done: false,
+            tray_tip_shown: false,
             keep_recordings_days: 7,
             openai: OpenAiSettings::default(),
             dashscope: DashScopeSettings::default(),
@@ -444,6 +511,12 @@ impl SettingsStore {
     /// unreadable. An unreadable file is set aside first, so the next save
     /// does not overwrite the user's only copy.
     pub fn load(&self) -> Settings {
+        let mut settings = self.read();
+        settings.hotkey = settings.hotkey.here();
+        settings
+    }
+
+    fn read(&self) -> Settings {
         match fs::read_to_string(&self.path) {
             Ok(text) => serde_json::from_str(&text).unwrap_or_else(|error| {
                 let backup = self.path.with_extension("json.bak");
@@ -562,5 +635,44 @@ mod tests {
         let backup = fs::read_to_string(dir.join("settings.json.bak")).unwrap();
         assert!(backup.contains("leftShift"), "{backup}");
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_app_matches_by_its_words() {
+        assert!(super::app_match("Outlook", "Microsoft Outlook").is_some());
+        assert!(super::app_match("text editor", "gnome-text-editor").is_some());
+        assert!(super::app_match("MAIL", "Mail").is_some());
+        assert!(super::app_match("Mail", "Mailspring").is_none());
+        assert!(super::app_match("Code", "Xcode").is_none());
+        assert!(super::app_match("", "Mail").is_none());
+        assert!(super::app_match("微信", "微信").is_some());
+    }
+
+    #[test]
+    fn the_most_specific_tone_wins() {
+        let mut polish = PolishSettings::default();
+        polish.set_tone("Code", Some(Tone::Literal));
+        polish.set_tone("Visual Studio Code", Some(Tone::Casual));
+        assert_eq!(polish.tone_in("Visual Studio Code"), Tone::Casual);
+        assert_eq!(polish.tone_in("Code - Insiders"), Tone::Literal);
+        assert_eq!(polish.tone_in("Microsoft Outlook"), polish.default_tone);
+    }
+
+    #[test]
+    fn of_equally_specific_tones_the_first_wins() {
+        let mut polish = PolishSettings::default();
+        polish.set_tone("Microsoft", Some(Tone::Literal));
+        polish.set_tone("Outlook", Some(Tone::Casual));
+        assert_eq!(polish.tone_in("Microsoft Outlook"), Tone::Literal);
+    }
+
+    #[test]
+    fn a_key_from_another_system_becomes_this_ones() {
+        for &key in Hotkey::AVAILABLE {
+            assert_eq!(key.here(), key);
+        }
+        let elsewhere = if cfg!(target_os = "macos") { Hotkey::RightAlt } else { Hotkey::Fn };
+        assert_eq!(elsewhere.here(), Hotkey::default());
+        assert!(Hotkey::AVAILABLE.contains(&Hotkey::default()));
     }
 }

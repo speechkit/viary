@@ -31,6 +31,7 @@ import { usePlayback, type Playback } from "../lib/playback";
 import { speakerColor } from "../lib/speakers";
 import { currentIndex, daysAgo, spaced } from "../lib/transcript";
 import type { Intent } from "../windows/MainWindow";
+import { cmd, NEW_NOTE, MARK, THIS_COMPUTER, TRAY } from "../lib/platform";
 
 
 const lbl = "text-[11px] font-semibold tracking-[0.06em] text-faint uppercase";
@@ -44,7 +45,7 @@ function summaryOnDevice(s: Snapshot) {
 
 function PrivacyChip({ onDevice, kind, long }: { onDevice: boolean; kind?: string; long?: boolean }) {
   if (!onDevice) return <MetaChip tone="cloud">Cloud{kind ? ` · ${kind}` : ""}</MetaChip>;
-  return <MetaChip tone="device">{long ? "On-device · nothing leaves this Mac" : "On-device"}</MetaChip>;
+  return <MetaChip tone="device">{long ? `On-device · nothing leaves ${THIS_COMPUTER}` : "On-device"}</MetaChip>;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,8 +193,8 @@ function Empty({ s, onRecord }: { s: Snapshot; onRecord: () => void }) {
       <button
         type="button"
         onClick={onRecord}
-        aria-label="Start recording (⌥⌘N)"
-        title="Start recording (⌥⌘N)"
+        aria-label={`Start recording (${NEW_NOTE})`}
+        title={`Start recording (${NEW_NOTE})`}
         className="flex size-[132px] items-center justify-center rounded-full bg-white shadow-[0_0_0_10px_rgba(224,69,43,0.10),0_14px_34px_rgba(28,27,24,0.16),inset_0_0_0_2px_#E7E1D5]"
       >
         <span aria-hidden="true" className="size-16 rounded-full bg-record" />
@@ -207,8 +208,8 @@ function Empty({ s, onRecord }: { s: Snapshot; onRecord: () => void }) {
       </div>
       <div className="flex items-center gap-2 text-[13px] text-muted">
         <span>Press</span>
-        <Kbd>⌥⌘N</Kbd>
-        <span>from any app, or choose New voice note in the menu bar.</span>
+        <Kbd>{NEW_NOTE}</Kbd>
+        <span>from any app, or choose New voice note in the {TRAY}.</span>
       </div>
       <div className="flex gap-2">
         <MetaChip>
@@ -311,7 +312,7 @@ function Recording({ s, recorder }: { s: Snapshot; recorder: RecorderState }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey && e.key.toLowerCase() === "m" && !paused) {
+      if (cmd(e) && e.key.toLowerCase() === "m" && !paused) {
         e.preventDefault();
         api.noteMark().catch(console.error);
       }
@@ -419,7 +420,7 @@ function Recording({ s, recorder }: { s: Snapshot; recorder: RecorderState }) {
         <button type="button" disabled={paused} onClick={() => api.noteMark().catch(console.error)} className={pillBtn + " border-edge bg-white disabled:opacity-50"}>
           <Icon name="flag" />
           Mark moment
-          <span className="inline-flex h-5 items-center rounded-[5px] bg-sand px-1.5 font-mono text-[11px] text-muted">⌘M</span>
+          <span className="inline-flex h-5 items-center rounded-[5px] bg-sand px-1.5 font-mono text-[11px] text-muted">{MARK}</span>
         </button>
         <div className="grow" />
         {caption && <span className="max-w-[260px] text-right text-[13px] leading-[1.45] text-muted">{capitalize(caption)} are added when you stop.</span>}
@@ -709,7 +710,7 @@ function NoteView({ s, note }: { s: Snapshot; note: Note }) {
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey && e.key.toLowerCase() === "m") {
+      if (cmd(e) && e.key.toLowerCase() === "m") {
         e.preventDefault();
         markHere.current();
       }
@@ -767,7 +768,7 @@ function NoteView({ s, note }: { s: Snapshot; note: Note }) {
                     onClick={() => toggleMark(i)}
                     aria-pressed={marked(i)}
                     aria-label={marked(i) ? "Remove mark" : "Mark this passage"}
-                    title={marked(i) ? "Remove mark" : "Mark this passage (⌘M marks where playback is)"}
+                    title={marked(i) ? "Remove mark" : `Mark this passage (${MARK} marks where playback is)`}
                     className={
                       "rounded-[5px] p-0.5 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 " +
                       (marked(i) ? "text-[#B7791F] hover:bg-[#FFF1D6]" : "text-faint hover:bg-sand hover:text-ink")
@@ -887,7 +888,7 @@ export function VoiceNotesPage({ s, onBack, intent }: { s: Snapshot; onBack: () 
         onBack={onBack}
         search={search}
         searchPlaceholder="Search notes"
-        action={{ label: "New note (⌥⌘N)", icon: <RecordIcon />, onClick: record }}
+        action={{ label: `New note (${NEW_NOTE})`, icon: <RecordIcon />, onClick: record }}
       >
         <NoteList
           notes={notes}

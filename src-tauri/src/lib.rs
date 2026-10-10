@@ -7,23 +7,31 @@ mod engines;
 mod history;
 mod icons;
 mod json_store;
+mod mic_test;
 mod keychain;
-#[cfg(target_os = "macos")]
-mod macos;
 mod note_recorder;
 mod notes;
+mod pause;
+mod platform;
 mod polish;
 mod reload;
 mod settings;
 mod subtitles;
 mod transcriber;
 mod transcripts;
+#[cfg(not(target_os = "macos"))]
+mod tray_menu;
 mod recording;
 mod ui;
+mod voiced;
 
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock, mpsc::Sender},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
+    },
     time::{Duration, Instant},
 };
 
@@ -33,6 +41,7 @@ use speechkit::{
     sherpa::Provider as ExecutionProvider,
 };
 use tauri::{AppHandle, Emitter, Manager, State, tray::TrayIconBuilder};
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 use crate::{
@@ -40,7 +49,10 @@ use crate::{
     engines::{EngineInfo, EngineStatus, Engines, ModelInspection},
     history::{Entry, History, Status},
     keychain::Provider,
-    macos::{hotkey::HotkeyListener, permissions},
+    platform::{
+        hotkey::{HotkeyEvent, HotkeyListener},
+        permissions,
+    },
     settings::{
         DashScopeSettings, DictionaryEntry, Hotkey, Language, LocalModel, OpenAiSettings,
         Settings, SettingsStore, Tone,
@@ -60,6 +72,9 @@ pub struct App {
     pill: Mutex<PillView>,
     dictation: OnceLock<Sender<Msg>>,
     hotkey: OnceLock<HotkeyListener>,
+    pause: pause::Pause,
+    /// The setup window is testing the talk key: report it, start nothing.
+    key_test: AtomicBool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -166,6 +181,8 @@ struct Keys {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Snapshot {
+    /// `macos`, `windows`, or `linux`.
+    platform: &'static str,
     settings: Settings,
     speech_caps: caps::SpeechCaps,
     engine: EngineStatus,
@@ -174,13 +191,20 @@ struct Snapshot {
     hotkey_active: bool,
     hotkey_name: &'static str,
     pill: PillView,
+    /// Dictation paused from the tray.
+    paused: Option<pause::Paused>,
+    /// The session, shortcut, and typing method on Linux; null elsewhere.
+    desktop: serde_json::Value,
+    /// The keyboard layout on Windows; null elsewhere.
+    keyboard: Option<platform::Keyboard>,
+    autostart: bool,
     /// Each local model's family, as the Voice engine screen describes it.
     families: Vec<(String, engines::FamilyInfo)>,
     punct_layout: Option<String>,
 }
 
 #[tauri::command]
-fn get_state(state: State<'_, App>) -> Snapshot {
+fn get_state(app: AppHandle, state: State<'_, App>) -> Snapshot {
     let settings = state.settings();
     let families = settings
         .local_models
@@ -189,6 +213,7 @@ fn get_state(state: State<'_, App>) -> Snapshot {
         .collect();
     let punct_layout = settings.punct_model.as_deref().and_then(engines::punct_kind);
     Snapshot {
+        platform: platform::NAME,
         engine: state.engines.status(),
         keys: Keys {
             open_ai: keychain::has(Provider::OpenAi),
@@ -199,6 +224,10 @@ fn get_state(state: State<'_, App>) -> Snapshot {
         hotkey_active: state.hotkey.get().is_some_and(HotkeyListener::is_active),
         hotkey_name: dictation::key_name(settings.hotkey),
         pill: lock(&state.pill).clone(),
+        paused: state.pause.get(),
+        desktop: platform::desktop(),
+        keyboard: platform::keyboard(),
+        autostart: app.autolaunch().is_enabled().unwrap_or(false),
         families,
         punct_layout,
         speech_caps: caps::current(),
@@ -215,7 +244,7 @@ struct Microphone {
 
 #[tauri::command]
 fn list_microphones() -> CmdResult<Vec<Microphone>> {
-    Ok(speechkit::io::Microphone::list()
+    Ok(recording::Recording::microphones()
         .map_err(|e| engines::describe(&e))?
         .into_iter()
         .map(|d| Microphone {
@@ -396,10 +425,14 @@ fn set_preferences(app: AppHandle, state: State<'_, App>, prefs: Preferences) ->
         let parsed = provider
             .parse::<ExecutionProvider>()
             .map_err(|e| engines::describe(&e))?;
-        // CUDA needs an NVIDIA GPU; on a Mac only the CPU and CoreML run.
-        if cfg!(target_os = "macos") && parsed == ExecutionProvider::Cuda {
-            return Err(format!("{provider} is not available on this Mac"));
+        if !engines::PROVIDERS.contains(&parsed) {
+            return Err(format!("{provider} is not available on this computer"));
         }
+    }
+    if let Some(hotkey) = prefs.hotkey
+        && !Hotkey::AVAILABLE.contains(&hotkey)
+    {
+        return Err(format!("{} is not a talk key on this computer", dictation::key_name(hotkey)));
     }
     let inference_changed = prefs.provider.is_some() || prefs.threads.is_some();
     let settings = state.change(|s| {
@@ -634,7 +667,7 @@ async fn history_retranscribe(app: AppHandle, id: String) -> CmdResult<()> {
 
 #[tauri::command]
 fn copy_text(text: String) {
-    macos::pasteboard::set_text(&text);
+    platform::pasteboard::set_text(&text);
 }
 
 // ---------------------------------------------------------------------------
@@ -657,13 +690,102 @@ fn request_permission(app: AppHandle, kind: String) {
     ui::refresh(&app);
 }
 
+/// Pauses dictation for `minutes`, or until resumed when `None`.
+#[tauri::command]
+fn pause_dictation(app: AppHandle, state: State<'_, App>, minutes: Option<u64>) {
+    state
+        .pause
+        .start(&app, minutes.map(|m| Duration::from_secs(m.saturating_mul(60))));
+}
+
+#[tauri::command]
+fn set_autostart(app: AppHandle, on: bool) -> CmdResult<()> {
+    let autostart = app.autolaunch();
+    if on { autostart.enable() } else { autostart.disable() }.map_err(err)?;
+    ui::refresh(&app);
+    Ok(())
+}
+
+/// Installs Viary's GNOME Shell extension (Linux).
+#[tauri::command]
+async fn install_extension(app: AppHandle) -> CmdResult<()> {
+    let installed = tauri::async_runtime::spawn_blocking(platform::install_extension)
+        .await
+        .map_err(err)?;
+    ui::refresh(&app);
+    installed
+}
+
+#[tauri::command]
+fn set_key_test(state: State<'_, App>, on: bool) {
+    state.key_test.store(on, Ordering::SeqCst);
+}
+
+/// Setup ran to its end: it does not open again. Async, so it runs off the
+/// main thread: building the tip's web view from a synchronous command
+/// deadlocks on Windows (WebView2).
+#[tauri::command]
+async fn finish_setup(app: AppHandle) -> CmdResult<()> {
+    let state = app.state::<App>();
+    ui::end_setup_tests(&app);
+    let before = state.settings();
+    state.change(|s| {
+        s.setup_done = true;
+        s.tray_tip_shown = true;
+    });
+    if let Some(setup) = app.get_webview_window("setup") {
+        let _ = setup.close();
+    }
+    // Windows hides a new tray icon under ^: say where Viary went, once.
+    if cfg!(target_os = "windows")
+        && !before.tray_tip_shown
+        && let Err(error) = ui::show_tray_tip(&app)
+    {
+        tracing::warn!(%error, "cannot show the tray tip");
+    }
+    ui::refresh(&app);
+    Ok(())
+}
+
+/// Starts or ends the setup window's microphone test (`mic-level` events,
+/// or `mic-error`). Returns before the microphone is open.
+#[tauri::command]
+fn mic_test(app: AppHandle, on: bool) {
+    mic_test::request(&app, on);
+}
+
+/// Closes the tray tip; `show_me` opens the taskbar settings first.
+#[tauri::command]
+fn close_tray_tip(app: AppHandle, show_me: bool) {
+    if show_me {
+        permissions::open_settings("taskbar");
+    }
+    if let Some(tip) = app.get_webview_window("tip") {
+        let _ = tip.close();
+    }
+}
+
+#[tauri::command]
+fn resume_dictation(app: AppHandle, state: State<'_, App>) {
+    state.pause.resume(&app);
+}
+
 #[tauri::command]
 fn open_main(app: AppHandle, page: String) {
     ui::open_main(&app, &page);
 }
 
-/// ⌥⌘N, from anywhere: Voice Notes, recording.
+/// From anywhere: Voice Notes, recording. ⌥⌘N on macOS (Win+Alt+N on
+/// Windows, Ctrl+Alt+N on Linux).
+#[cfg(target_os = "macos")]
 const NEW_NOTE_SHORTCUT: (Modifiers, Code) = (Modifiers::ALT.union(Modifiers::SUPER), Code::KeyN);
+/// Not Ctrl+Alt+N: Windows reports AltGr as Ctrl+Alt, so a global
+/// Ctrl+Alt+N would take AltGr+N (ń on Polish) from every app.
+#[cfg(target_os = "windows")]
+const NEW_NOTE_SHORTCUT: (Modifiers, Code) = (Modifiers::SUPER.union(Modifiers::ALT), Code::KeyN);
+/// X11 and GNOME keep AltGr apart from Ctrl+Alt.
+#[cfg(target_os = "linux")]
+const NEW_NOTE_SHORTCUT: (Modifiers, Code) = (Modifiers::CONTROL.union(Modifiers::ALT), Code::KeyN);
 
 /// Opens Voice Notes and starts recording, unless a note already is.
 fn new_voice_note_now(app: &AppHandle) -> Result<(), String> {
@@ -1053,36 +1175,57 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
         pill: Mutex::new(PillView::Idle),
         dictation: OnceLock::new(),
         hotkey: OnceLock::new(),
+        pause: pause::Pause::default(),
+        key_test: AtomicBool::new(false),
     });
     let state = app.state::<App>();
 
     // Windows: the pill is always there; the main window opens on first run.
     ui::build_pill(&handle)?;
     ui::build_popover(&handle)?;
-    ui::build_main(&handle, first_run)?;
+    // Windows and Linux walk a first-time user through setup in a window
+    // of its own.
+    let setting_up = !cfg!(target_os = "macos") && !settings.setup_done;
+    ui::build_main(&handle, first_run && !setting_up)?;
+    if setting_up {
+        ui::build_setup(&handle)?;
+    }
 
-    TrayIconBuilder::with_id(ui::TRAY_ID)
+    let tray = TrayIconBuilder::with_id(ui::TRAY_ID)
         .icon(ui::tray_icon())
-        .icon_as_template(true)
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip("Viary")
-        .show_menu_on_left_click(false)
+        // Linux shows the menu on any click; Windows on a right click.
+        .show_menu_on_left_click(cfg!(target_os = "linux"))
         .on_tray_icon_event(|tray, event| {
-            if let tauri::tray::TrayIconEvent::Click {
-                button_state: tauri::tray::MouseButtonState::Up,
-                rect,
-                ..
-            } = event
-            {
-                ui::toggle_popover(tray.app_handle(), rect);
+            use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+            match event {
+                // macOS: any click opens the popover. Windows: a left click
+                // opens it; the right click shows the menu.
+                TrayIconEvent::Click {
+                    button,
+                    button_state: MouseButtonState::Up,
+                    rect,
+                    ..
+                } if cfg!(target_os = "macos") || button == MouseButton::Left => {
+                    ui::toggle_popover(tray.app_handle(), rect);
+                }
+                #[cfg(not(target_os = "macos"))]
+                TrayIconEvent::Enter { .. } => tray_menu::refresh(tray.app_handle()),
+                _ => {}
             }
-        })
-        .build(app)?;
+        });
+    #[cfg(not(target_os = "macos"))]
+    let tray = tray
+        .menu(&tray_menu::build(&handle)?)
+        .on_menu_event(tray_menu::on_event);
+    tray.build(app)?;
     #[cfg(target_os = "macos")]
     if let Some(tray) = app.tray_by_id(ui::TRAY_ID) {
         let dropped = handle.clone();
         let _ = tray.with_inner_tray_icon(move |inner| {
             if let Some(item) = inner.ns_status_item() {
-                macos::tray_drop::install(&item, move |paths| {
+                platform::tray_drop::install(&item, move |paths| {
                     // Called on the main thread; folders are looked through
                     // on another.
                     let dropped = dropped.clone();
@@ -1101,15 +1244,28 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
         .register(Shortcut::new(Some(modifiers), key))
     {
         // Another app holds ⌥⌘N; the menu bar item still works.
-        tracing::warn!(%error, "cannot register ⌥⌘N");
+        tracing::warn!(%error, "cannot register the new voice note shortcut");
     }
 
     transcriber::spawn(handle.clone());
     note_recorder::retry_pending(handle.clone());
     let mailbox = dictation::spawn(handle.clone());
     let _ = state.dictation.set(mailbox.clone());
+    #[cfg(target_os = "linux")]
+    platform::init(&handle);
+    let keys = handle.clone();
     let listener = HotkeyListener::spawn(settings.hotkey, move |event| {
-        let _ = mailbox.send(Msg::Hotkey(event, Instant::now()));
+        let at = Instant::now();
+        match event {
+            HotkeyEvent::Down => keys.emit("hotkey", "down"),
+            HotkeyEvent::Up => keys.emit("hotkey", "up"),
+            HotkeyEvent::OtherKey => Ok(()),
+        }
+        .ok();
+        if keys.state::<App>().key_test.load(Ordering::SeqCst) {
+            return;
+        }
+        let _ = mailbox.send(Msg::Hotkey(event, at));
     });
     let _ = state.hotkey.set(listener);
 
@@ -1141,6 +1297,24 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// Viary was started again while running: shows Viary.
+#[cfg(not(target_os = "macos"))]
+fn another_launch(app: &AppHandle) {
+    // Setup comes back while it is open or still to finish; a setup
+    // window kept hidden after that is not what opening Viary means.
+    let setup = app.get_webview_window("setup").filter(|setup| {
+        setup.is_visible().unwrap_or(false) || !app.state::<App>().settings().setup_done
+    });
+    match setup {
+        Some(setup) => {
+            let _ = setup.show();
+            let _ = setup.unminimize();
+            let _ = setup.set_focus();
+        }
+        None => ui::open_main(app, "home"),
+    }
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1148,8 +1322,21 @@ pub fn run() {
                 .unwrap_or_else(|_| "info,viary_lib=debug".into()),
         )
         .init();
-    let built = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Windows and Linux start a second Viary as readily as the first (at
+    // sign-in, then from the Start menu): it would add a second keyboard
+    // hook and tray icon. The second shows the first and quits.
+    // Registered first, as the plugin asks.
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        another_launch(app);
+    }));
+    let built = builder
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -1165,6 +1352,14 @@ pub fn run() {
         )
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
+            pause_dictation,
+            resume_dictation,
+            set_autostart,
+            set_key_test,
+            install_extension,
+            finish_setup,
+            close_tray_tip,
+            mic_test,
             get_state,
             list_microphones,
             inspect_model,

@@ -1,5 +1,5 @@
 // Dev only: renders Viary's windows in a browser against a mocked backend,
-// to compare them with the design. Open /preview.html?w=main|popover|pill.
+// to compare them with the design. Open /preview.html?w=main|popover|pill|setup|tip.
 
 import "@fontsource/geist-sans/400.css";
 import "@fontsource/geist-sans/500.css";
@@ -29,6 +29,7 @@ import type {
   TranscriptDoc,
   TranscriptSettings,
 } from "./lib/ipc";
+import { PLATFORM } from "./lib/platform";
 
 const params = new URLSearchParams(location.search);
 const label = params.get("w") ?? "main";
@@ -40,7 +41,17 @@ const now = Date.now();
 // without it, the preview has speechkit 0.5's real capabilities.
 const mockCaps = params.get("caps") === "mock";
 
+// ?os=windows or ?os=linux renders that system's windows and wording.
+const HOTKEYS = {
+  macos: { hotkey: "fn", name: "fn" },
+  windows: { hotkey: "rightAlt", name: "Right Alt" },
+  linux: { hotkey: "shortcut", name: "Ctrl+Alt+Space" },
+} as const;
+
+const KEY_NAMES = { fn: "fn", rightOption: "right ⌥", rightCommand: "right ⌘", rightAlt: "Right Alt", ctrlWin: "Ctrl + Win", shortcut: "Ctrl+Alt+Space" };
+
 const snapshot: Snapshot = {
+  platform: PLATFORM,
   speechCaps: { speakers: mockCaps, wordTimings: mockCaps, wordConfidence: mockCaps, mock: mockCaps },
   settings: {
     // ?fileEngine=dashscope (no key here) or local:gone shows an engine for files that can't be used.
@@ -56,7 +67,7 @@ const snapshot: Snapshot = {
     threads: 2,
     microphone: null,
     language: "auto",
-    hotkey: "fn",
+    hotkey: HOTKEYS[PLATFORM].hotkey,
     keepRecordingsDays: 7,
     openai: { baseUrl: "https://api.openai.com/v1", model: "", mode: "file" },
     dashscope: { model: "", region: "china" },
@@ -79,7 +90,8 @@ const snapshot: Snapshot = {
       baseUrl: "http://localhost:11434/v1",
       model: "qwen3:8b",
       tones: [
-        { app: "Mail", tone: "formal" },
+        // Windows names apps by their file description: Outlook for Mail.
+        { app: PLATFORM === "windows" ? "Outlook" : "Mail", tone: "formal" },
         { app: "Slack", tone: "casual" },
         { app: "Notes", tone: "asSpoken" },
         { app: "VS Code", tone: "literal" },
@@ -96,9 +108,23 @@ const snapshot: Snapshot = {
   },
   keys: { openAi: true, dashScope: false, customPolish: false },
   permissions: { accessibility: true, inputMonitoring: true },
-  hotkeyActive: true,
-  hotkeyName: "fn",
+  // On GNOME Wayland, the shortcut is live once Viary's extension runs:
+  // ?ext=active.
+  hotkeyActive: PLATFORM !== "linux" || params.get("ext") === "active",
+  hotkeyName: HOTKEYS[PLATFORM].name,
   pill: { kind: "idle" },
+  paused: null,
+  autostart: true,
+  // ?altgr=1: a German or French layout, where Right Alt is AltGr.
+  keyboard: PLATFORM === "windows" ? { altGr: params.get("altgr") === "1" } : null,
+  desktop:
+    PLATFORM === "linux"
+      ? {
+          session: "wayland",
+          // ?ext=installed, active or updated: the extension's other states.
+          extension: (params.get("ext") as "installed" | "active" | "updated" | null) ?? "missing",
+        }
+      : null,
   families: [
     ["1", { id: "streaming-transducer", label: "Streaming Zipformer", description: "Shows words while you speak. Commits a phrase at each pause.", tags: ["Live preview", "Hotwords"], streaming: true, needsVad: false, nativePunctuation: false }],
     ["2", { id: "sense-voice", label: "SenseVoice", description: "Fast and punctuated. Transcribes each phrase after a pause.", tags: ["5 languages", "Punctuation"], streaming: false, needsVad: true, nativePunctuation: true }],
@@ -107,7 +133,7 @@ const snapshot: Snapshot = {
 };
 
 const history: HistoryItem[] = [
-  { id: "a", createdAt: now - 60_000, app: "Mail", durationMs: 26_000, text: "Hi Mei, thanks for the notes on the release plan. We tag 0.2.0 on Thursday, once the nightly run is green.", raw: "hi mei thanks for the notes on the release plan we tag 0.2.0 on thursday once the nightly run is green", punctuated: "Hi Mei, thanks for the notes on the release plan. We tag 0.2.0 on Thursday, once the nightly run is green.", engine: { name: "sherpa-onnx-streaming-zipformer-en-2023-06-26", kind: "Streaming Zipformer", onDevice: true }, status: "inserted", error: null, recording: null, recordingPath: null, words: 21 },
+  { id: "a", createdAt: now - 60_000, app: PLATFORM === "windows" ? "Microsoft Outlook" : "Mail", durationMs: 26_000, text: "Hi Mei, thanks for the notes on the release plan. We tag 0.2.0 on Thursday, once the nightly run is green.", raw: "hi mei thanks for the notes on the release plan we tag 0.2.0 on thursday once the nightly run is green", punctuated: "Hi Mei, thanks for the notes on the release plan. We tag 0.2.0 on Thursday, once the nightly run is green.", engine: { name: "sherpa-onnx-streaming-zipformer-en-2023-06-26", kind: "Streaming Zipformer", onDevice: true }, status: "inserted", error: null, recording: null, recordingPath: null, words: 21 },
   { id: "b", createdAt: now - 3_600_000, app: "Slack", durationMs: 9_000, text: "", raw: "", punctuated: null, engine: { name: "gpt-4o-transcribe", kind: "OpenAI", onDevice: false }, status: "failed", error: "backend `openai-http` failed: connection reset", recording: null, recordingPath: null, words: 0 },
 ];
 
@@ -467,6 +493,8 @@ function transcriptCommand(cmd: string, a: Record<string, unknown>): unknown {
   }
 }
 
+let micTimer: ReturnType<typeof setInterval> | undefined;
+
 /** Commands that change settings update the mock and tell the windows. */
 function changed() {
   setTimeout(() => emit("state-changed"), 0);
@@ -522,6 +550,53 @@ mockIPC(
     if (cmd === "polish_preview") {
       await new Promise((r) => setTimeout(r, 700));
       return "Can you rerun the nightly with three test threads? Models aborted again.";
+    }
+    if (cmd === "pause_dictation") {
+      const minutes = a.minutes as number | null;
+      snapshot.paused = { until: minutes ? Date.now() + minutes * 60_000 : null };
+      changed();
+      return null;
+    }
+    if (cmd === "resume_dictation") {
+      snapshot.paused = null;
+      changed();
+      return null;
+    }
+    if (cmd === "install_extension" && snapshot.desktop) {
+      await new Promise((r) => setTimeout(r, 600));
+      snapshot.desktop.extension = "installed";
+      changed();
+      return null;
+    }
+    if (cmd === "mic_test") {
+      // A voice that comes and goes, for the setup window's meter.
+      clearInterval(micTimer);
+      if (a.on) {
+        let t = 0;
+        micTimer = setInterval(() => emit("mic-level", Math.max(0.002, Math.abs(Math.sin(t++ * 0.31)) * 0.12)), 50);
+      }
+      return null;
+    }
+    if (cmd === "close_tray_tip") {
+      console.info("close_tray_tip", a);
+      return null;
+    }
+    if (cmd === "set_autostart") {
+      snapshot.autostart = a.on as boolean;
+      changed();
+      return null;
+    }
+    if (cmd === "set_key_test") {
+      // ?os=windows&w=setup: a fake press of the talk key while testing it.
+      if (a.on) setTimeout(() => emit("hotkey", "down").then(() => setTimeout(() => emit("hotkey", "up"), 900)), 1500);
+      return null;
+    }
+    if (cmd === "set_preferences") {
+      Object.assign(snapshot.settings, a.prefs as object);
+      const hotkey = (a.prefs as { hotkey?: keyof typeof KEY_NAMES }).hotkey;
+      if (hotkey) snapshot.hotkeyName = KEY_NAMES[hotkey];
+      changed();
+      return null;
     }
     if (cmd === "history_list") return history;
     if (cmd === "audio_extensions") return ["aac", "flac", "m4a", "mka", "mkv", "mp3", "mp4", "oga", "ogg", "wav"];
@@ -584,6 +659,32 @@ async function render() {
         setInterval(() => emit("pill-level", 0.02 + Math.abs(Math.sin(t++ * 0.7)) * 0.12), 60);
       }
     }, 300);
+  } else if (label === "setup") {
+    const { Setup } = await import("./windows/Setup");
+    // A dictation from start to "Inserted", for the Try it step:
+    // run mockDictation() in the console.
+    Object.assign(window, {
+      mockDictation: async () => {
+        const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        await emit("pill-state", { kind: "listening", token: 9, startedAt: Date.now(), context: "Setup", live: true });
+        await wait(2200);
+        await emit("pill-state", { kind: "transcribing", label: "Transcribing" });
+        await wait(800);
+        await emit("pill-state", { kind: "inserted", label: "Inserted 7 words", canRaw: false });
+        await wait(1500);
+        await emit("pill-state", { kind: "idle" });
+      },
+    });
+    document.body.style.background = "#CEC8BA";
+    root.render(
+      <div style={{ width: 1040, height: 700, margin: 24, borderRadius: 8, overflow: "hidden", boxShadow: "0 0 0 1px rgba(0,0,0,.12)" }}>
+        <Setup />
+      </div>,
+    );
+  } else if (label === "tip") {
+    const { TrayTip } = await import("./windows/TrayTip");
+    document.body.style.background = "#3C5A74";
+    root.render(<TrayTip />);
   } else if (label === "popover") {
     const { Popover } = await import("./windows/Popover");
     document.body.style.background = "#CEC8BA";

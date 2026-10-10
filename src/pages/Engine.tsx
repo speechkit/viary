@@ -17,6 +17,7 @@ import {
   type Provider,
   type Snapshot,
 } from "../lib/ipc";
+import { isMac, KEY_STORE, THIS_COMPUTER } from "../lib/platform";
 
 /** A local model's line under its card: installed, in use, loading, failed. */
 function modelState(s: Snapshot, id: string, model: LocalModel, family?: FamilyInfo): { text: string; color: string } {
@@ -93,7 +94,10 @@ function LocalCard({ s, model, onError }: { s: Snapshot; model: LocalModel; onEr
 }
 
 /** Adds a model folder: detect its layout, and ask for the family only when the files cannot tell. */
-function AddModel({ onError }: { onError: (e: string) => void }) {
+/** Adding a model folder: pick it, and when its files fit more than one
+ *  family, `found` holds it until the user chooses one. The model added
+ *  becomes the engine in use. */
+export function useAddModel(onError: (e: string) => void) {
   const [found, setFound] = useState<ModelInspection | null>(null);
   const [family, setFamily] = useState<string>("");
   const [busy, setBusy] = useState(false);
@@ -128,6 +132,18 @@ function AddModel({ onError }: { onError: (e: string) => void }) {
     }
   };
 
+  return { found, family, setFamily, busy, pick, add, cancel: () => setFound(null) };
+}
+
+/** Lets the user pick silero_vad.onnx, which phrase-by-phrase models need. */
+export async function chooseVad(onError: (e: string) => void) {
+  const file = await open({ title: "Choose silero_vad.onnx", filters: [{ name: "ONNX model", extensions: ["onnx"] }] });
+  if (typeof file === "string") api.setVadModel(file).catch((e) => onError(errorText(e)));
+}
+
+export function AddModel({ onError }: { onError: (e: string) => void }) {
+  const { found, family, setFamily, busy, pick, add, cancel } = useAddModel(onError);
+
   if (found) {
     return (
       <div className="flex flex-col gap-3 rounded-[14px] border-2 border-blue bg-white px-[18px] py-4">
@@ -150,7 +166,7 @@ function AddModel({ onError }: { onError: (e: string) => void }) {
           <button type="button" className={btnPrimary} disabled={busy} onClick={() => add(found, family)}>
             Add and use
           </button>
-          <button type="button" className={btn} onClick={() => setFound(null)}>
+          <button type="button" className={btn} onClick={cancel}>
             Cancel
           </button>
         </div>
@@ -214,7 +230,7 @@ function KeyField({ s, provider, onError }: { s: Snapshot; provider: Provider; o
       <div className="flex items-center gap-2">
         <span className="inline-flex items-center gap-1.5 text-[13px] whitespace-nowrap text-teal-ink">
           <Icon name="shield" size={14} />
-          Stored in the Keychain
+          Stored in {KEY_STORE}
         </span>
         <div className="grow" />
         <button type="button" className={btn} onClick={() => setReplacing(true)}>
@@ -253,7 +269,7 @@ function KeyField({ s, provider, onError }: { s: Snapshot; provider: Provider; o
         onChange={(e) => setKey(e.target.value)}
       />
       <button type="submit" className={btnPrimary} disabled={!key.trim()}>
-        Save to Keychain
+        {isMac ? "Save to Keychain" : "Save key"}
       </button>
       {replacing && (
         <button type="button" className={btn} onClick={() => setReplacing(false)}>
@@ -414,10 +430,7 @@ export function EnginePage({ s }: { s: Snapshot }) {
   const { settings } = s;
   const defaultMic = mics.find((m) => m.isDefault);
 
-  const chooseVad = async () => {
-    const file = await open({ title: "Choose silero_vad.onnx", filters: [{ name: "ONNX model", extensions: ["onnx"] }] });
-    if (typeof file === "string") api.setVadModel(file).catch((e) => setError(errorText(e)));
-  };
+  const pickVad = () => chooseVad(setError);
   const choosePunct = async () => {
     const dir = await open({ directory: true, title: "Choose a sherpa-onnx punctuation model folder" });
     if (typeof dir === "string") api.setPunctModel(dir).catch((e) => setError(errorText(e)));
@@ -434,7 +447,7 @@ export function EnginePage({ s }: { s: Snapshot }) {
 
       <ErrorBanner error={error} onDismiss={() => setError("")} />
 
-      <H2>On this Mac</H2>
+      <H2>On {THIS_COMPUTER}</H2>
       <div role="radiogroup" aria-label="Recognition engine" className="grid grid-cols-3 gap-3.5">
         {settings.localModels.map((m) => (
           <LocalCard key={m.id} s={s} model={m} onError={setError} />
@@ -446,7 +459,7 @@ export function EnginePage({ s }: { s: Snapshot }) {
           title="Voice activity detection"
           caption="silero_vad.onnx. Models that transcribe phrase by phrase need it to find pauses."
           value={settings.vadModel}
-          choose={chooseVad}
+          choose={pickVad}
           clear={() => api.setVadModel(null)}
         />
         <PathRow
@@ -459,17 +472,24 @@ export function EnginePage({ s }: { s: Snapshot }) {
         <div className="flex items-center gap-3.5 px-[18px] py-3">
           <div className="flex min-w-0 grow flex-col gap-0.5">
             <span className="text-sm font-medium">Run models on</span>
-            <span className="text-[13px] leading-[1.45] text-muted">CoreML may use the GPU or the Neural Engine.</span>
+            <span className="text-[13px] leading-[1.45] text-muted">
+              {isMac ? "CoreML may use the GPU or the Neural Engine." : "The processor: Viary’s speech models run on the CPU here."}
+            </span>
           </div>
-          <Seg
-            label="Execution provider"
-            value={settings.provider}
-            options={[
-              ["cpu", "CPU"],
-              ["coreml", "CoreML"],
-            ]}
-            onChange={(provider) => api.setPreferences({ provider }).catch((e) => setError(errorText(e)))}
-          />
+          {/* CoreML is Apple's; elsewhere the CPU is the only choice. */}
+          {isMac ? (
+            <Seg
+              label="Execution provider"
+              value={settings.provider}
+              options={[
+                ["cpu", "CPU"],
+                ["coreml", "CoreML"],
+              ]}
+              onChange={(provider) => api.setPreferences({ provider }).catch((e) => setError(errorText(e)))}
+            />
+          ) : (
+            <span className="text-[13px] font-medium text-muted">CPU</span>
+          )}
         </div>
       </div>
 

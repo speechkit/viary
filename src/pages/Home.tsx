@@ -2,8 +2,9 @@
 // recent dictations.
 
 import { useEffect, useRef, useState } from "react";
-import { Icon, Kbd } from "../components/Icons";
-import { api, useHistory, type Snapshot } from "../lib/ipc";
+import { Icon, KeyCombo } from "../components/Icons";
+import { api, shortcutTrouble, useHistory, type Snapshot } from "../lib/ipc";
+import { isMac, PLATFORM, SYSTEM_SETTINGS, THIS_COMPUTER } from "../lib/platform";
 
 /** An average typing speed, for the time saved; Viary does not measure yours. */
 const TYPING_WPM = 40;
@@ -30,16 +31,11 @@ function Step({ done, title, text, action }: { done: boolean; title: string; tex
   );
 }
 
-function Shortcut({ keys, title, text, soon = false }: { keys: string[]; title: string; text: string; soon?: boolean }) {
+/** `combo` as key caps, then `times` (a double tap) if more than once. */
+function Shortcut({ combo, times = 1, title, text, soon = false }: { combo: string; times?: number; title: string; text: string; soon?: boolean }) {
   return (
     <div className={"flex flex-col gap-2.5" + (soon ? " opacity-60" : "")}>
-      <div className="flex gap-1.5">
-        {keys.map((key, i) => (
-          <Kbd key={i} large>
-            {key}
-          </Kbd>
-        ))}
-      </div>
+      <KeyCombo combo={combo} large after={times > 1 && <span className="ml-1 text-[13px] font-medium text-muted">×{times}</span>} />
       <span className="flex items-center gap-2 text-[15px] font-semibold">
         {title}
         {soon && (
@@ -89,7 +85,16 @@ export function HomePage({ s, go }: { s: Snapshot; go: Go }) {
   const seconds = week.reduce((sum, h) => sum + h.durationMs, 0) / 1000;
   const wpm = seconds > 5 ? Math.round(words / (seconds / 60)) : null;
   const saved = Math.max(0, Math.round(words / TYPING_WPM - seconds / 60));
-  const setupDone = !!s.engine.active && s.permissions.inputMonitoring && s.permissions.accessibility;
+  // Windows needs nothing but the microphone switch; Linux, the talk
+  // shortcut (on Wayland, heard by Viary's extension, which also types);
+  // macOS, the key watched and permission to type.
+  const allowed =
+    PLATFORM === "windows"
+      ? s.permissions.microphone !== false
+      : PLATFORM === "linux"
+        ? s.hotkeyActive
+        : (s.permissions.inputMonitoring || s.hotkeyActive) && s.permissions.accessibility;
+  const setupDone = !!s.engine.active && allowed;
   const today = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
 
   return (
@@ -107,14 +112,22 @@ export function HomePage({ s, go }: { s: Snapshot; go: Go }) {
 
       {trying > 0 && <Practice hotkey={s.hotkeyName} n={trying} close={() => setTrying(0)} />}
 
-      <div className="grid grid-cols-3 gap-6 rounded-[14px] border border-line bg-white px-6 py-5">
-        <Shortcut keys={[s.hotkeyName]} title="Hold to dictate" text="Release to insert where your cursor is." />
-        <Shortcut
-          keys={[s.hotkeyName, s.hotkeyName]}
-          title="Double-tap for hands-free"
-          text="Keeps listening until you tap again."
-        />
-        <Shortcut keys={[s.hotkeyName, "⇧"]} title="Speak to edit" text="Select text, then say how to change it." soon />
+      <div className="overflow-hidden rounded-[14px] border border-line bg-white">
+        {!s.hotkeyActive && (
+          <div role="alert" className="flex items-center gap-4 border-b border-hair bg-sand px-6 py-3">
+            <span className="grow text-[13px]">
+              {`${s.hotkeyName} does nothing right now.`} {shortcutTrouble(s)}
+            </span>
+            <button type="button" className={btn} onClick={() => go("settings")}>
+              Settings
+            </button>
+          </div>
+        )}
+        <div className={"grid grid-cols-3 gap-6 px-6 py-5" + (s.hotkeyActive ? "" : " opacity-60")}>
+          <Shortcut combo={s.hotkeyName} title="Hold to dictate" text="Release to insert where your cursor is." />
+          <Shortcut combo={s.hotkeyName} times={2} title="Double-tap for hands-free" text="Keeps listening until you tap again." />
+          <Shortcut combo={`${s.hotkeyName}+${isMac ? "⇧" : "Shift"}`} title="Speak to edit" text="Select text, then say how to change it." soon />
+        </div>
       </div>
 
       {!setupDone && (
@@ -123,33 +136,59 @@ export function HomePage({ s, go }: { s: Snapshot; go: Go }) {
           <Step
             done={!!s.engine.active}
             title="Choose a voice engine"
-            text="A sherpa-onnx model folder on this Mac, or OpenAI or DashScope with your key."
+            text={`A sherpa-onnx model folder on ${THIS_COMPUTER}, or OpenAI or DashScope with your key.`}
             action={
               <button type="button" className={btn} onClick={() => go("engine")}>
                 Voice engine
               </button>
             }
           />
-          <Step
-            done={s.permissions.inputMonitoring || s.hotkeyActive}
-            title={`Let Viary notice the ${s.hotkeyName} key`}
-            text="Input Monitoring. Viary only watches the dictation key."
-            action={
-              <button type="button" className={btn} onClick={() => api.requestPermission("inputMonitoring")}>
-                Allow…
-              </button>
-            }
-          />
-          <Step
-            done={s.permissions.accessibility}
-            title="Let Viary type into apps"
-            text="Accessibility, to paste the text and see if a text field has focus."
-            action={
-              <button type="button" className={btn} onClick={() => api.requestPermission("accessibility")}>
-                Allow…
-              </button>
-            }
-          />
+          {PLATFORM === "windows" ? (
+            <Step
+              done={s.permissions.microphone !== false}
+              title="Let desktop apps use the microphone"
+              text={`Turned off in ${SYSTEM_SETTINGS} › Privacy & security › Microphone.`}
+              action={
+                <button type="button" className={btn} onClick={() => api.requestPermission("microphone")}>
+                  Open {SYSTEM_SETTINGS}
+                </button>
+              }
+            />
+          ) : PLATFORM === "linux" ? (
+            <Step
+              done={s.hotkeyActive}
+              title={`Let Viary hear ${s.hotkeyName}`}
+              text={shortcutTrouble(s) ?? "Viary hears the talk shortcut and types into apps."}
+              action={
+                <button type="button" className={btn} onClick={() => go("settings")}>
+                  Settings
+                </button>
+              }
+            />
+          ) : (
+            <>
+              <Step
+                done={s.permissions.inputMonitoring || s.hotkeyActive}
+                title={`Let Viary notice the ${s.hotkeyName} key`}
+                text="Input Monitoring. Viary only watches the dictation key."
+                action={
+                  <button type="button" className={btn} onClick={() => api.requestPermission("inputMonitoring")}>
+                    Allow…
+                  </button>
+                }
+              />
+              <Step
+                done={s.permissions.accessibility}
+                title="Let Viary type into apps"
+                text="Accessibility, to paste the text and see if a text field has focus."
+                action={
+                  <button type="button" className={btn} onClick={() => api.requestPermission("accessibility")}>
+                    Allow…
+                  </button>
+                }
+              />
+            </>
+          )}
         </section>
       )}
 

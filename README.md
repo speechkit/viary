@@ -44,6 +44,15 @@ Engines such as SenseVoice do not support recognition hotwords. With these engin
 
 For an independent polish service, choose **Custom** under **Polish & tone** to connect to an OpenAI-compatible chat API. Enter its API base URL and chat model ID, and an API key if required. **Test connection** uses the current form without saving it; **Save** stores the settings and puts the key in a separate macOS Keychain entry. Leave the key field blank to keep a stored key, or use **Remove key** for an unauthenticated server. OpenAI and DashScope presets continue to reuse Voice engine credentials. Only transcripts are sent for polishing; the destination is shown in the model card.
 
+## Windows and Linux
+
+The parts that talk to the system live in `src-tauri/src/platform/`, one module per system with the same items; everything else is shared.
+
+- **Windows** (in progress): hold Right Alt or Ctrl + Win, watched by a low-level keyboard hook that only listens. Text goes in with Ctrl+V through `SendInput`, with the clipboard saved and restored and kept out of clipboard history. Apps running as administrator do not accept Viary's keys, so their text stays on the clipboard. API keys are in Windows Credential Manager. Left-click the tray icon for the flyout, right-click for the menu.
+- **Linux** (in progress, GNOME): the talk shortcut is Ctrl+Alt+Space, held to talk. On Wayland, Viary's GNOME Shell extension (`gnome-extension/`, installed from the setup window; GNOME starts it at the next login) grabs the shortcut, types the text, names the focused app, and draws the pill; Viary needs it there. On X11, Viary grabs the shortcut itself and types with XTest. API keys are in the GNOME keyring.
+
+CI builds and tests on macOS, Windows, and Ubuntu 26.04 (`.github/workflows/ci.yml`). On Ubuntu it also starts a headless GNOME Shell on Wayland with Viary's extension and checks the extension (`ci/gnome-wayland.sh`). `/preview.html?os=windows` renders the windows as they look on Windows.
+
 ## Tests
 
 ```sh

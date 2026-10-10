@@ -161,8 +161,8 @@ mod tests {
     #[test]
     #[ignore = "reads the live desktop"]
     fn frontmost_app_focus() {
-        let app = crate::macos::apps::frontmost().unwrap();
-        let trusted = crate::macos::permissions::accessibility();
+        let app = crate::platform::apps::frontmost().unwrap();
+        let trusted = crate::platform::permissions::can_type();
         let focus = super::focused(app.pid);
         println!(
             "app={} pid={} trusted={trusted} focus={focus:?}",
