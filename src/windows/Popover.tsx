@@ -5,7 +5,7 @@ import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useEffect, useRef, useState } from "react";
 import { Switch } from "../components/Controls";
-import { AppTile, Icon, Kbd } from "../components/Icons";
+import { AppTile, Icon, Kbd, KeyCombo } from "../components/Icons";
 import { api, engineName, useHistory, useSnapshot, type Language, type Snapshot } from "../lib/ipc";
 import { cmd, isMac, NEW_NOTE, shortcut } from "../lib/platform";
 
@@ -204,7 +204,7 @@ export function Popover() {
                 className="inline-flex"
               >
                 <span aria-hidden="true">
-                  <Kbd>{s.hotkeyName}</Kbd>
+                  <KeyCombo combo={s.hotkeyName} />
                 </span>
               </span>
             </div>

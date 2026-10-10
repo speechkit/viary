@@ -3,7 +3,7 @@
 
 import { useState } from "react";
 import { ErrorBanner, Switch } from "../components/Controls";
-import { Icon, Kbd } from "../components/Icons";
+import { Icon, KeyCombo } from "../components/Icons";
 import { api, errorText, shortcutTrouble, type Desktop, type Hotkey, type Snapshot } from "../lib/ipc";
 import { PLATFORM, type Platform } from "../lib/platform";
 import { KeyTest } from "../windows/Setup";
@@ -119,7 +119,7 @@ export function SettingsPage({ s }: { s: Snapshot }) {
               }
             >
               <span className="flex w-full items-center justify-between">
-                <Kbd large>{label}</Kbd>
+                <KeyCombo combo={label} large />
                 <span className="size-[18px] rounded-full" style={{ border: on ? "5px solid #1C1B18" : "1.5px solid #CFC8B8" }} />
               </span>
               <span className="text-[13px] leading-[1.45] text-muted">{text}</span>
