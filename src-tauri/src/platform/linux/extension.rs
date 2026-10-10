@@ -3,13 +3,15 @@
 //! the pill. Its pill buttons come back as a `PillAction` signal.
 //!
 //! GNOME on Wayland loads a newly installed extension only at the next
-//! login, so "installed" and "active" are told apart.
+//! login, so "installed" and "active" are told apart. A new Viary brings
+//! its extension up to date at startup, which also runs from the next
+//! login: until then the shell runs the old one, or none if it fails.
 
 use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU8, AtomicU32, Ordering},
     },
 };
 
@@ -43,7 +45,35 @@ pub enum Status {
     Installed,
     /// Running in the shell.
     Active,
+    /// Running in the shell, an older version than the one on disk, which
+    /// runs from the next login.
+    Updated,
 }
+
+/// The version of the extension this Viary brings: `VERSION` in its
+/// `extension.js`, which the shell also reports.
+fn bundled_version() -> u32 {
+    version_in(FILES[1].1).unwrap_or(0)
+}
+
+/// `const VERSION = n;` in an `extension.js`.
+fn version_in(script: &str) -> Option<u32> {
+    script.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("const VERSION =")?;
+        value.trim().trim_end_matches(';').trim().parse().ok()
+    })
+}
+
+/// The version on disk, if the extension is there; 0 for one too old to
+/// say.
+fn installed_version() -> Option<u32> {
+    let script = std::fs::read_to_string(dir()?.join("extension.js")).ok()?;
+    Some(version_in(&script).unwrap_or(0))
+}
+
+/// The version the shell runs, once [`watch_owner`] has asked; 0 if none
+/// is running or it has not said.
+static RUNNING: AtomicU32 = AtomicU32::new(0);
 
 fn dir() -> Option<PathBuf> {
     let data = std::env::var_os("XDG_DATA_HOME")
@@ -94,7 +124,8 @@ async fn has_owner() -> zbus::Result<bool> {
 
 pub fn status() -> Status {
     if active() {
-        Status::Active
+        let running = RUNNING.load(Ordering::SeqCst);
+        if running != 0 && running < bundled_version() { Status::Updated } else { Status::Active }
     } else if dir().is_some_and(|d| d.join("extension.js").is_file()) {
         Status::Installed
     } else {
@@ -105,11 +136,7 @@ pub fn status() -> Status {
 /// Writes the extension into the user's extensions folder and enables it.
 /// GNOME on Wayland runs it from the next login.
 pub fn install() -> Result<(), String> {
-    let dir = dir().ok_or("no home folder")?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    for (name, text) in FILES {
-        std::fs::write(dir.join(name), text).map_err(|e| format!("cannot write {name}: {e}"))?;
-    }
+    write_files()?;
     let enabled = std::process::Command::new("gnome-extensions")
         .args(["enable", UUID])
         .output()
@@ -120,6 +147,32 @@ pub fn install() -> Result<(), String> {
         add_to_enabled()?;
     }
     Ok(())
+}
+
+fn write_files() -> Result<(), String> {
+    let dir = dir().ok_or("no home folder")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    for (name, text) in FILES {
+        std::fs::write(dir.join(name), text).map_err(|e| format!("cannot write {name}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Replaces an installed extension older than this Viary's. The user chose
+/// to install it, so it is kept up to date with Viary, as Viary's own
+/// files are; whether it is turned on is left as it is.
+fn update() {
+    let Some(installed) = installed_version() else {
+        return;
+    };
+    let bundled = bundled_version();
+    if installed >= bundled {
+        return;
+    }
+    match write_files() {
+        Ok(()) => tracing::info!(installed, bundled, "updated Viary's GNOME Shell extension; it runs from the next login"),
+        Err(error) => tracing::warn!(%error, "cannot update Viary's GNOME Shell extension"),
+    }
 }
 
 fn add_to_enabled() -> Result<(), String> {
@@ -224,6 +277,7 @@ pub fn partial(token: u64, text: String) {
 /// Acts on the pill's buttons, for as long as Viary runs.
 /// Also follows whether the extension is running.
 pub fn listen(app: &AppHandle) {
+    update();
     let app = app.clone();
     let watching = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -252,7 +306,9 @@ async fn watch_owner(app: &AppHandle) -> zbus::Result<()> {
         .add_arg(BUS)?
         .build();
     let mut stream = MessageStream::for_match_rule(rule, &connection, None).await?;
-    if set_active(has_owner().await?) {
+    let owned = has_owner().await?;
+    read_running_version(owned).await;
+    if set_active(owned) {
         crate::ui::refresh(app);
     }
     while let Some(message) = stream.next().await {
@@ -265,11 +321,42 @@ async fn watch_owner(app: &AppHandle) -> zbus::Result<()> {
         let Ok((name, _old, new)) = message.body().deserialize::<(String, String, String)>() else {
             continue;
         };
-        if name == BUS && set_active(!new.is_empty()) {
-            crate::ui::refresh(app);
+        if name == BUS {
+            read_running_version(!new.is_empty()).await;
+            if set_active(!new.is_empty()) {
+                crate::ui::refresh(app);
+            }
         }
     }
     Ok(())
+}
+
+/// Asks the shell which version it runs, if it runs one.
+async fn read_running_version(running: bool) {
+    let version = if running {
+        async {
+            let reply = super::session_bus()
+                .await?
+                .call_method(
+                    Some(BUS),
+                    PATH,
+                    Some("org.freedesktop.DBus.Properties"),
+                    "Get",
+                    &(BUS, "Version"),
+                )
+                .await?;
+            let value: zbus::zvariant::OwnedValue = reply.body().deserialize()?;
+            Ok::<u32, zbus::Error>(u32::try_from(value).unwrap_or(0))
+        }
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot ask the GNOME Shell extension its version");
+            0
+        })
+    } else {
+        0
+    };
+    RUNNING.store(version, Ordering::SeqCst);
 }
 
 async fn actions(app: &AppHandle) -> zbus::Result<()> {
@@ -301,6 +388,19 @@ async fn actions(app: &AppHandle) -> zbus::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_bundled_extension_names_its_version() {
+        assert!(super::bundled_version() >= 2);
+        assert_eq!(super::version_in("const VERSION = 12;\n"), Some(12));
+        assert_eq!(super::version_in("const OTHER = 1;"), None);
+    }
+
+    #[test]
+    fn metadata_and_script_agree_on_the_version() {
+        let metadata: serde_json::Value = serde_json::from_str(super::FILES[0].1).unwrap();
+        assert_eq!(metadata["version"], super::bundled_version());
+    }
+
     /// Run by `ci/gnome-wayland.sh`, inside a headless GNOME Shell with the
     /// extension installed: Viary finds it and it answers.
     #[test]

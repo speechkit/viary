@@ -57,6 +57,10 @@ struct Prefs {
     typing: Typing,
     /// Restores the RemoteDesktop permission without asking again.
     restore_token: Option<String>,
+    /// Whether GNOME last handed the talk shortcut over. GNOME may not
+    /// keep it from one run of Viary to the next, so it is asked for
+    /// again. Not known from earlier Viary builds.
+    shortcut_bound: Option<bool>,
 }
 
 struct Desktop {
@@ -104,6 +108,9 @@ async fn session_bus() -> ashpd::zbus::Result<ashpd::zbus::Connection> {
     static BUS: tokio::sync::OnceCell<ashpd::zbus::Connection> = tokio::sync::OnceCell::const_new();
     BUS.get_or_try_init(|| async {
         let connection = ashpd::zbus::Connection::session().await?;
+        // Viary serves nothing, but zbus wants a server up before a name
+        // is owned; calls to it are then answered, not lost.
+        let _ = connection.object_server();
         if let Err(error) = connection.request_name(CLIENT_NAME).await {
             tracing::warn!(%error, "cannot own {CLIENT_NAME}; the GNOME Shell extension will not answer");
         }

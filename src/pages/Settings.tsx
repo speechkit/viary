@@ -219,7 +219,7 @@ function LinuxSettings({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
       {wayland ? (
         <div role="radiogroup" aria-label="Typing method" className={card}>
           {TYPING.map((t) => {
-            const waiting = t.id === "extension" && extension !== "active";
+            const waiting = t.id === "extension" && extension !== "active" && extension !== "updated";
             const on = !waiting && desktop.typing === t.id;
             return (
               <div key={t.id} className="flex items-center gap-3.5 border-b border-hair px-[18px] py-3 last:border-b-0">
@@ -243,6 +243,8 @@ function LinuxSettings({ s, desktop }: { s: Snapshot; desktop: Desktop }) {
                         ? `${t.text} Not installed.`
                         : t.id === "extension" && extension === "installed"
                           ? "Installed. GNOME starts it the next time you log in."
+                          : t.id === "extension" && extension === "updated"
+                            ? `${t.text} Updated with Viary: the new version runs the next time you log in.`
                           : t.id === "portal" && desktop.portalAllowed
                             ? "GNOME allowed it. Take it back in GNOME Settings › Privacy."
                             : t.text}

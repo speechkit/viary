@@ -11,7 +11,7 @@ use std::{
 use speechkit::{
     AudioBuffer, SampleRate, SpeechError,
     asr::{AsrEngine, AsrOptions, AsrResult, AsrUpdate, LiveTranscript},
-    io::{Capture, CaptureOptions, ListenOptions, Listening, Microphone},
+    io::{Capture, CaptureOptions, DeviceInfo, ListenOptions, Listening, Microphone},
 };
 
 /// The most audio kept for History and Retry.
@@ -38,6 +38,17 @@ impl Recording {
             }),
             None => Microphone::open_default(),
         }
+    }
+
+    /// The microphones to offer by name. On Linux, ALSA lists its plugins
+    /// (rate converters, JACK, OSS, up- and downmixers) and its default
+    /// device, which says it is an output, beside each card several
+    /// times under the same name, which speechkit cannot open by name: left
+    /// out, the default device is Default, as the system's sound settings
+    /// choose it.
+    pub fn microphones() -> Result<Vec<DeviceInfo>, SpeechError> {
+        let list = Microphone::list()?;
+        Ok(if cfg!(target_os = "linux") { openable_on_alsa(list) } else { list })
     }
 
     /// Starts at once; speechkit retains audio while the backend connects.
@@ -201,6 +212,35 @@ impl Recording {
     }
 }
 
+/// What ALSA's own devices say they are, at the start of their first line.
+const ALSA_PLUGINS: [&str; 13] = [
+    "Default ALSA",
+    "Discard all samples",
+    "JACK",
+    "Open Sound System",
+    "OSS",
+    "Rate Converter",
+    "Plugin for channel",
+    "Plugin using Speex",
+    "Speex",
+    "PulseAudio",
+    "PipeWire",
+    "USB Stream",
+    "Playback/recording through",
+];
+
+fn openable_on_alsa(list: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
+    let names: Vec<String> = list.iter().map(|d| d.name.clone()).collect();
+    list.into_iter().filter(|d| kept_on_alsa(&d.name, d.is_default, &names)).collect()
+}
+
+/// Whether the device `name`, among `names`, is offered on ALSA.
+fn kept_on_alsa(name: &str, is_default: bool, names: &[String]) -> bool {
+    !is_default
+        && names.iter().filter(|other| *other == name).count() == 1
+        && !ALSA_PLUGINS.iter().any(|plugin| name.starts_with(plugin))
+}
+
 impl Drop for Recording {
     fn drop(&mut self) {
         self.listening.cancel();
@@ -305,6 +345,26 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn alsa_plugins_and_names_shared_by_several_devices_are_left_out() {
+        let devices = [
+            ("Default ALSA Output (currently PipeWire Media Server)", true),
+            ("JACK Audio Connection Kit", false),
+            ("Rate Converter Plugin Using Samplerate Library", false),
+            ("PipeWire Sound Server", false),
+            ("HDA Intel PCH, ALC256 Analog", false),
+            ("HDA Intel PCH, ALC256 Analog", false),
+            ("Blue Yeti, USB Audio", false),
+        ];
+        let names: Vec<String> = devices.iter().map(|(name, _)| (*name).to_owned()).collect();
+        let kept: Vec<&str> = devices
+            .iter()
+            .filter(|(name, is_default)| kept_on_alsa(name, *is_default, &names))
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(kept, ["Blue Yeti, USB Audio"]);
     }
 
     #[test]

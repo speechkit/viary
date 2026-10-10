@@ -18,9 +18,10 @@ use std::{
 use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
 use futures_util::StreamExt;
 use serde::Serialize;
+use tauri::Manager;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-use super::{app, gsettings, gsettings_list, gsettings_set_list, is_wayland};
+use super::{app, change_prefs, gsettings, gsettings_list, gsettings_set_list, is_wayland, prefs};
 use crate::{lock, settings::Hotkey};
 
 /// What the listener reports.
@@ -220,8 +221,17 @@ async fn open_portal(listener: &Arc<Listener>) -> ashpd::Result<()> {
     let proxy = GlobalShortcuts::new().await?;
     let session = proxy.create_session(Default::default()).await?;
     let listed = proxy.list_shortcuts(&session, Default::default()).await?.response()?;
-    let bound = listed.shortcuts().iter().any(|s| s.id() == TALK);
+    let mut bound = listed.shortcuts().iter().any(|s| s.id() == TALK);
     set_trigger(talk_trigger(listed.shortcuts()));
+    // A new session starts with no shortcuts on GNOME, even ones it handed
+    // over last time: ask again, or the shortcut is dead after a restart.
+    // GNOME answers at once for a shortcut it already allowed.
+    if !bound && had_shortcut() {
+        match bind_talk(&proxy, &session).await {
+            Ok(again) => bound = again,
+            Err(error) => tracing::warn!(%error, "cannot get the talk shortcut back from GNOME"),
+        }
+    }
     let mut activated = std::pin::pin!(proxy.receive_activated().await?);
     let mut deactivated = std::pin::pin!(proxy.receive_deactivated().await?);
     let mut changed = std::pin::pin!(proxy.receive_shortcuts_changed().await?);
@@ -243,12 +253,15 @@ async fn open_portal(listener: &Arc<Listener>) -> ashpd::Result<()> {
             }
         }
     };
-    // Changed in GNOME Settings: name the new keys.
+    // Changed in GNOME Settings: name the new keys, or note it is gone.
     let renamed = async {
         while let Some(event) = changed.next().await {
-            if set_trigger(talk_trigger(event.shortcuts()))
-                && let Some(app) = app()
-            {
+            let bound = event.shortcuts().iter().any(|s| s.id() == TALK);
+            let renamed = set_trigger(talk_trigger(event.shortcuts()));
+            if bound != status().bound {
+                remember_bound(bound);
+                set_status(listener, Status { mode: Mode::Hold, bound });
+            } else if renamed && let Some(app) = app() {
                 crate::ui::refresh(app);
             }
         }
@@ -271,20 +284,44 @@ pub fn bind() -> Result<(), String> {
         _ => tauri::async_runtime::block_on(async {
             let portal = listener.portal.lock().await;
             let (proxy, session) = portal.as_ref().ok_or("GNOME has not answered yet")?;
-            let shortcut = NewShortcut::new(TALK, "Talk: hold to speak, release to type")
-                .preferred_trigger(PREFERRED_TRIGGER);
-            let bound = proxy
-                .bind_shortcuts(session, &[shortcut], None, Default::default())
-                .await
-                .and_then(|request| request.response())
-                .map_err(|e| e.to_string())?;
-            set_trigger(talk_trigger(bound.shortcuts()));
-            let bound = bound.shortcuts().iter().any(|s| s.id() == TALK);
+            let bound = bind_talk(proxy, session).await.map_err(|e| e.to_string())?;
             drop(portal);
+            remember_bound(bound);
             set_status(&listener, Status { mode: Mode::Hold, bound });
             Ok::<(), String>(())
         }),
     }
+}
+
+/// Asks GNOME for the talk shortcut in `session`; whether it handed it
+/// over. Names its keys.
+async fn bind_talk(
+    proxy: &GlobalShortcuts,
+    session: &ashpd::desktop::Session<GlobalShortcuts>,
+) -> ashpd::Result<bool> {
+    let shortcut = NewShortcut::new(TALK, "Talk: hold to speak, release to type")
+        .preferred_trigger(PREFERRED_TRIGGER);
+    let bound = proxy
+        .bind_shortcuts(session, &[shortcut], None, Default::default())
+        .await?
+        .response()?;
+    set_trigger(talk_trigger(bound.shortcuts()));
+    Ok(bound.shortcuts().iter().any(|s| s.id() == TALK))
+}
+
+/// Keeps whether GNOME handed the shortcut over, to ask again next time.
+fn remember_bound(bound: bool) {
+    if prefs().shortcut_bound != Some(bound) {
+        change_prefs(|p| p.shortcut_bound = Some(bound));
+    }
+}
+
+/// Whether GNOME handed the shortcut over last time; before Viary kept
+/// that, whether the user went through setup, which asks for it.
+fn had_shortcut() -> bool {
+    prefs().shortcut_bound.unwrap_or_else(|| {
+        app().is_some_and(|app| app.state::<crate::App>().settings().setup_done)
+    })
 }
 
 // ---------------------------------------------------------------------------

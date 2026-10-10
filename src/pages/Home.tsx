@@ -117,14 +117,32 @@ export function HomePage({ s, go }: { s: Snapshot; go: Go }) {
 
       {trying > 0 && <Practice hotkey={s.hotkeyName} n={trying} close={() => setTrying(0)} />}
 
-      <div className="grid grid-cols-3 gap-6 rounded-[14px] border border-line bg-white px-6 py-5">
-        <Shortcut keys={[s.hotkeyName]} title="Hold to dictate" text="Release to insert where your cursor is." />
-        <Shortcut
-          keys={[s.hotkeyName, s.hotkeyName]}
-          title="Double-tap for hands-free"
-          text="Keeps listening until you tap again."
-        />
-        <Shortcut keys={[s.hotkeyName, isMac ? "⇧" : "Shift"]} title="Speak to edit" text="Select text, then say how to change it." soon />
+      <div className="overflow-hidden rounded-[14px] border border-line bg-white">
+        {!s.hotkeyActive && (
+          <div role="alert" className="flex items-center gap-4 border-b border-hair bg-sand px-6 py-3">
+            <span className="grow text-[13px]">
+              {PLATFORM === "linux"
+                ? `${s.hotkeyName} does nothing right now: GNOME has not handed it to Viary.`
+                : `${s.hotkeyName} does nothing right now.`}
+            </span>
+            <button
+              type="button"
+              className={btn}
+              onClick={() => (PLATFORM === "linux" ? api.bindShortcut().catch(() => go("settings")) : go("settings"))}
+            >
+              {PLATFORM === "linux" ? "Ask GNOME…" : "Settings"}
+            </button>
+          </div>
+        )}
+        <div className={"grid grid-cols-3 gap-6 px-6 py-5" + (s.hotkeyActive ? "" : " opacity-60")}>
+          <Shortcut keys={[s.hotkeyName]} title="Hold to dictate" text="Release to insert where your cursor is." />
+          <Shortcut
+            keys={[s.hotkeyName, s.hotkeyName]}
+            title="Double-tap for hands-free"
+            text="Keeps listening until you tap again."
+          />
+          <Shortcut keys={[s.hotkeyName, isMac ? "⇧" : "Shift"]} title="Speak to edit" text="Select text, then say how to change it." soon />
+        </div>
       </div>
 
       {!setupDone && (

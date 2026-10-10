@@ -233,7 +233,7 @@ fn microphones(app: &AppHandle) -> Vec<String> {
     if stale && !LISTING.swap(true, Ordering::SeqCst) {
         let app = app.clone();
         std::thread::spawn(move || {
-            let names: Vec<String> = speechkit::io::Microphone::list()
+            let names: Vec<String> = crate::recording::Recording::microphones()
                 .map(|list| list.into_iter().map(|m| m.name).collect())
                 .unwrap_or_default();
             let changed = {
