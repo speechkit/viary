@@ -1,11 +1,13 @@
 //! A microphone test for the setup window: the chosen microphone's level,
-//! sent as `mic-level` events twenty times a second while the test runs.
-//! Nothing is recorded or transcribed.
+//! sent as `mic-level` events twenty times a second while the test runs,
+//! or a `mic-error` event when the microphone cannot be opened. Nothing is
+//! recorded or transcribed.
 
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     time::Duration,
 };
@@ -23,9 +25,40 @@ struct Running {
 
 static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
 
+/// Starts (`on`) or ends the test. Returns at once: opening a microphone
+/// can take a while (a Bluetooth headset), so a thread of its own does it,
+/// one request after another, and only the latest of those waiting: a
+/// start then an end, as a window loses the focus, ends it.
+pub fn request(app: &AppHandle, on: bool) {
+    static REQUESTS: OnceLock<mpsc::Sender<bool>> = OnceLock::new();
+    let requests = REQUESTS.get_or_init(|| {
+        let (sender, received) = mpsc::channel::<bool>();
+        let app = app.clone();
+        let spawned = std::thread::Builder::new()
+            .name("viary-mic-test-requests".into())
+            .spawn(move || {
+                while let Ok(mut on) = received.recv() {
+                    while let Ok(later) = received.try_recv() {
+                        on = later;
+                    }
+                    if !on {
+                        stop();
+                    } else if let Err(error) = start(&app) {
+                        let _ = app.emit("mic-error", error);
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "cannot start the microphone test");
+        }
+        sender
+    });
+    let _ = requests.send(on);
+}
+
 /// Starts the test on the microphone in the settings, ending any test
 /// already running (the microphone may have changed).
-pub fn start(app: &AppHandle) -> Result<(), String> {
+fn start(app: &AppHandle) -> Result<(), String> {
     stop();
     let name = app.state::<App>().settings().microphone;
     let microphone = Recording::open_microphone(name.as_deref()).map_err(|e| crate::engines::describe(&e))?;
@@ -48,7 +81,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
 }
 
 /// Ends the test and releases the microphone.
-pub fn stop() {
+fn stop() {
     if let Some(running) = lock(&RUNNING).take() {
         running.stop.store(true, Ordering::Release);
         running.capture.stop();

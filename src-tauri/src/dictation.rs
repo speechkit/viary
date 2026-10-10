@@ -39,6 +39,7 @@ use crate::{
     settings::{Hotkey, Settings},
     recording::Recording,
     ui::{self, TrayState},
+    voiced,
 };
 
 /// A key press shorter than this is a tap, not a dictation.
@@ -187,6 +188,8 @@ pub enum Msg {
 pub struct Transcribed {
     result: Result<Transcript, SpeechError>,
     audio: Arc<AudioBuffer>,
+    /// Where `audio` starts on the segments' clock.
+    origin: Duration,
     engine: Option<Arc<LoadedEngine>>,
 }
 
@@ -611,6 +614,7 @@ impl Controller {
         } = *listening;
         let deadline = finish_deadline(started.elapsed());
         recording.stop();
+        let origin = recording.origin();
         let token = self.token;
         self.show(PillView::Transcribing {
             label: transcribing_label(&engine.info),
@@ -634,6 +638,7 @@ impl Controller {
                 Transcribed {
                     result,
                     audio,
+                    origin,
                     engine,
                 },
             ));
@@ -651,6 +656,8 @@ impl Controller {
         let info = done.engine.as_ref().map(|e| e.info.clone());
         match done.result {
             Ok(transcript) => {
+                // Room noise the engine wrote words for is not inserted.
+                let transcript = voiced::keep_heard(transcript, &done.audio, done.origin);
                 let raw = transcript.text();
                 if raw.trim().is_empty() {
                     if job.history_id.is_some() {
@@ -1000,6 +1007,7 @@ impl Controller {
                 Transcribed {
                     result,
                     audio,
+                    origin: Duration::ZERO,
                     engine,
                 },
             ));

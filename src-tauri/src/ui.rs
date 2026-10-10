@@ -6,7 +6,7 @@ use std::{
         Mutex,
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tauri::{
@@ -395,7 +395,7 @@ pub fn build_setup(app: &AppHandle, step: Option<&str>) -> tauri::Result<Webview
 /// starts dictations again and the microphone is let go.
 pub fn end_setup_tests(app: &AppHandle) {
     app.state::<App>().key_test.store(false, Ordering::SeqCst);
-    crate::mic_test::stop();
+    crate::mic_test::request(app, false);
 }
 
 /// The tip window: the card, and room around it for its shadow.
@@ -562,6 +562,7 @@ pub fn build_popover(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let handle = window.clone();
     window.on_window_event(move |event| match event {
         tauri::WindowEvent::Focused(false) => {
+            *crate::lock(&POPOVER_LEFT) = Some(Instant::now());
             let _ = handle.hide();
         }
         // The popover fits its height to its content; above a taskbar,
@@ -571,6 +572,11 @@ pub fn build_popover(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     });
     Ok(window)
 }
+
+/// When the popover last hid on losing the focus.
+static POPOVER_LEFT: Mutex<Option<Instant>> = Mutex::new(None);
+/// How soon after that a click on the icon is the one that took the focus.
+const CLICK_CLOSES_WITHIN: Duration = Duration::from_millis(300);
 
 /// The tray icon the popover last opened from, in logical pixels:
 /// `(x, y, width, height)`.
@@ -621,6 +627,11 @@ pub fn toggle_popover(app: &AppHandle, icon: tauri::Rect) {
     };
     if popover.is_visible().unwrap_or(false) {
         let _ = popover.hide();
+        return;
+    }
+    // Pressing the icon took the focus and hid the popover just now: the
+    // click was to close it, so it stays closed (the Windows taskbar).
+    if crate::lock(&POPOVER_LEFT).is_some_and(|at| at.elapsed() < CLICK_CLOSES_WITHIN) {
         return;
     }
     let scale = popover.scale_factor().unwrap_or(1.0);

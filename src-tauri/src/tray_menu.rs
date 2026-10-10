@@ -79,6 +79,10 @@ fn content(app: &AppHandle) -> Content {
                 Some(info) => format!("Ready · {}", info.kind),
                 None => "No voice engine".to_owned(),
             },
+            // Without the time left, which changes each minute: the menu
+            // would be replaced, and closed if open, as it did. Resume is
+            // below.
+            (ui::TrayState::Paused, _) => "Paused".to_owned(),
             (_, text) => sentence(&text),
         }
     } else {

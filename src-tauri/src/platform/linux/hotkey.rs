@@ -336,11 +336,15 @@ pub fn toggle() {
 /// the first sign.
 fn toggled(listener: &Listener) {
     (listener.on_event)(HotkeyEvent::Toggle);
-    if read_custom_trigger()
-        && let Some(app) = app()
-    {
-        crate::ui::refresh(app);
-    }
+    // On a thread of its own: a press can arrive as a second launch, on
+    // the main thread, which must not wait for `gsettings`.
+    std::thread::spawn(|| {
+        if read_custom_trigger()
+            && let Some(app) = app()
+        {
+            crate::ui::refresh(app);
+        }
+    });
 }
 
 /// `viary --toggle`: tells the running Viary, and returns whether one was
@@ -398,12 +402,11 @@ fn custom_list() -> Vec<String> {
     gsettings_list(MEDIA_KEYS, "custom-keybindings").unwrap_or_default()
 }
 
-/// Reads the custom shortcut's keys; true if they changed.
+/// Reads the custom shortcut's keys; true if they changed. One `gsettings`
+/// call: a shortcut GNOME Settings removed has its binding cleared too.
 fn read_custom_trigger() -> bool {
     let schema = format!("{MEDIA_KEYS}.custom-keybinding:{CUSTOM}");
-    let binding = custom_bound()
-        .then(|| gsettings(&["get", &schema, "binding"]).ok())
-        .flatten();
+    let binding = gsettings(&["get", &schema, "binding"]).ok();
     set_trigger(binding.as_deref().map(|b| b.trim_matches('\'')))
 }
 

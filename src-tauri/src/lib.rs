@@ -23,6 +23,7 @@ mod transcripts;
 mod tray_menu;
 mod recording;
 mod ui;
+mod voiced;
 
 use std::{
     path::PathBuf,
@@ -767,13 +768,11 @@ async fn finish_setup(app: AppHandle) -> CmdResult<()> {
     Ok(())
 }
 
-/// Starts or ends the setup window's microphone test (`mic-level` events).
+/// Starts or ends the setup window's microphone test (`mic-level` events,
+/// or `mic-error`). Returns before the microphone is open.
 #[tauri::command]
-fn mic_test(app: AppHandle, on: bool) -> CmdResult<()> {
-    if on { mic_test::start(&app) } else {
-        mic_test::stop();
-        Ok(())
-    }
+fn mic_test(app: AppHandle, on: bool) {
+    mic_test::request(&app, on);
 }
 
 /// Closes the tray tip; `show_me` opens the taskbar settings first.
