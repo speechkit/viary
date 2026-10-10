@@ -36,8 +36,9 @@ pub enum HotkeyEvent {
 }
 
 const TALK: &str = "talk";
-/// The shortcut as the XDG shortcuts specification writes it.
-const TRIGGER: &str = "CTRL+ALT+space";
+/// The shortcut Viary asks for, as the XDG shortcuts specification writes
+/// it.
+const PREFERRED_TRIGGER: &str = "CTRL+ALT+space";
 /// As GNOME's custom shortcuts write it.
 const GNOME_BINDING: &str = "<Control><Alt>space";
 const CUSTOM: &str = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/viary/";
@@ -271,7 +272,7 @@ pub fn bind() -> Result<(), String> {
             let portal = listener.portal.lock().await;
             let (proxy, session) = portal.as_ref().ok_or("GNOME has not answered yet")?;
             let shortcut = NewShortcut::new(TALK, "Talk: hold to speak, release to type")
-                .preferred_trigger(TRIGGER);
+                .preferred_trigger(PREFERRED_TRIGGER);
             let bound = proxy
                 .bind_shortcuts(session, &[shortcut], None, Default::default())
                 .await
