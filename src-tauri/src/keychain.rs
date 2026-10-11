@@ -4,7 +4,10 @@
 //! an engine or polish request is built. They never go back to the web view:
 //! the UI learns only whether a key is stored.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use speechkit::Secret;
 
@@ -12,15 +15,45 @@ use crate::lock;
 
 const SERVICE: &str = "app.viary.api-key";
 
-/// Whether each provider has a key, as last read or written here, by
+/// What the last read or write of each provider's key found, by
 /// [`Provider`] order. Every snapshot and tray menu asks, and Credential
 /// Manager and the Secret Service answer over IPC (the Secret Service may
 /// even ask to unlock the keyring). Keys change through Viary, which
 /// updates this.
-static HAS: Mutex<[Option<bool>; 3]> = Mutex::new([None; 3]);
+static HAS: Mutex<[Option<Known>; 3]> = Mutex::new([None; 3]);
+
+#[derive(Clone, Copy)]
+enum Known {
+    /// Whether there is a key.
+    Has(bool),
+    /// When the store last did not answer: a locked keyring, a dismissed
+    /// unlock prompt, the Secret Service not up yet at login. Not "no
+    /// key": asked again after [`ASK_AGAIN_AFTER`].
+    Unanswered(Instant),
+}
+
+/// How long a store that did not answer is left alone before asking again,
+/// so an unlock prompt does not come back with every snapshot.
+const ASK_AGAIN_AFTER: Duration = Duration::from_secs(60);
 
 fn remember(provider: Provider, has: bool) {
-    lock(&HAS)[provider as usize] = Some(has);
+    lock(&HAS)[provider as usize] = Some(Known::Has(has));
+}
+
+/// Reads `provider`'s key from the store and remembers what it found.
+fn read(provider: Provider) -> Result<Option<String>, String> {
+    match imp::get(provider.account()) {
+        Ok(key) => {
+            let key = key.filter(|key| !key.trim().is_empty());
+            remember(provider, key.is_some());
+            Ok(key)
+        }
+        Err(error) => {
+            tracing::warn!(%error, account = provider.account(), "cannot read the API key");
+            lock(&HAS)[provider as usize] = Some(Known::Unanswered(Instant::now()));
+            Err(error)
+        }
+    }
 }
 
 /// A cloud provider whose key Viary stores.
@@ -55,9 +88,14 @@ mod imp {
         set_generic_password(SERVICE, account, value.as_bytes()).map_err(|e| e.to_string())
     }
 
-    pub(super) fn get(account: &str) -> Option<String> {
-        let bytes = get_generic_password(SERVICE, account).ok()?;
-        String::from_utf8(bytes).ok()
+    /// The stored key; `Ok(None)` when there is none (or it is not text).
+    pub(super) fn get(account: &str) -> Result<Option<String>, String> {
+        match get_generic_password(SERVICE, account) {
+            Ok(bytes) => Ok(String::from_utf8(bytes).ok()),
+            // errSecItemNotFound: no key.
+            Err(error) if error.code() == -25300 => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     pub(super) fn delete(account: &str) -> Result<(), String> {
@@ -86,8 +124,13 @@ mod imp {
         entry(account)?.set_password(value).map_err(|e| e.to_string())
     }
 
-    pub(super) fn get(account: &str) -> Option<String> {
-        entry(account).ok()?.get_password().ok()
+    /// The stored key; `Ok(None)` when there is none (or it is not text).
+    pub(super) fn get(account: &str) -> Result<Option<String>, String> {
+        match entry(account)?.get_password() {
+            Ok(key) => Ok(Some(key)),
+            Err(Error::NoEntry | Error::BadEncoding(_)) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     pub(super) fn delete(account: &str) -> Result<(), String> {
@@ -111,18 +154,18 @@ pub fn save(provider: Provider, key: &str) -> Result<(), String> {
 
 /// The stored key, wrapped so it is never printed.
 pub fn load(provider: Provider) -> Option<Arc<Secret>> {
-    let key = imp::get(provider.account()).filter(|key| !key.trim().is_empty());
-    remember(provider, key.is_some());
-    key.map(|key| Arc::new(Secret::new(key)))
+    read(provider).ok().flatten().map(|key| Arc::new(Secret::new(key)))
 }
 
+/// Whether a key is stored. While the store does not answer, false, and
+/// asked again a minute later.
 pub fn has(provider: Provider) -> bool {
-    if let Some(has) = lock(&HAS)[provider as usize] {
-        return has;
+    let known = lock(&HAS)[provider as usize];
+    match known {
+        Some(Known::Has(has)) => has,
+        Some(Known::Unanswered(at)) if at.elapsed() < ASK_AGAIN_AFTER => false,
+        _ => read(provider).is_ok_and(|key| key.is_some()),
     }
-    let has = imp::get(provider.account()).is_some_and(|key| !key.trim().is_empty());
-    remember(provider, has);
-    has
 }
 
 pub fn delete(provider: Provider) -> Result<(), String> {

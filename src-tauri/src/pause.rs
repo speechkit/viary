@@ -6,13 +6,13 @@ use std::{
         Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
-use crate::{App, lock, ui};
+use crate::{App, history::now_ms, lock, ui};
 
 /// A pause in effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -33,13 +33,6 @@ pub struct Pause {
 /// (sleeping threads do not count suspended time), and to keep the
 /// tooltip's "for 12 more minutes" current.
 const TICK: Duration = Duration::from_secs(30);
-
-/// The time now, in milliseconds since the epoch.
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-}
 
 impl Pause {
     /// The pause in effect, if any.

@@ -33,10 +33,20 @@ pub fn frontmost() -> Option<TargetApp> {
     Some(TargetApp { pid, name, window })
 }
 
-/// Brings `target` back to the front and waits until it is; on Wayland,
-/// trusts that it still is. Returns whether it is.
+/// Brings `target` back to the front and waits until it is. Returns whether
+/// it is. Wayland lets no app raise another, so there it only checks that
+/// `target` still has the focus: the user may have moved on while the text
+/// was transcribed, and Ctrl+V or Ctrl+Z would go to the app they are in.
 pub fn activate(target: &TargetApp) -> bool {
-    if target.window == 0 || is_wayland() {
+    if is_wayland() {
+        // An app no one could name (no extension, or a window without a
+        // process) cannot be checked.
+        if target.pid == 0 {
+            return true;
+        }
+        return extension::focused_app().is_some_and(|(pid, _)| pid == target.pid);
+    }
+    if target.window == 0 {
         return true;
     }
     // Ctrl+V sent before the window is in front would go to the one that is.

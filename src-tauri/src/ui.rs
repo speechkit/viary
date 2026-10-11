@@ -253,7 +253,7 @@ fn status_text(app: &AppHandle, state: TrayState, attention: Option<&str>) -> St
         },
         TrayState::Paused => match viary.pause.get().and_then(|p| p.until) {
             Some(until) => {
-                format!("paused {}", paused_for(until.saturating_sub(crate::pause::now_ms())))
+                format!("paused {}", paused_for(until.saturating_sub(crate::history::now_ms())))
             }
             None => "paused until you resume".into(),
         },
@@ -282,6 +282,12 @@ pub fn tray_status(app: &AppHandle) -> (TrayState, String) {
         missing.is_some(),
     );
     (state, status_text(app, state, missing))
+}
+
+/// Whether no dictation is under way, as the tray last heard.
+#[cfg(not(target_os = "macos"))]
+pub fn dictation_idle() -> bool {
+    TrayState::from(DICTATION.load(Ordering::SeqCst)) == TrayState::Idle
 }
 
 /// The tray icon for the dictation's `state`.
@@ -338,11 +344,18 @@ fn draw_tray(app: &AppHandle, shown: &mut Option<(TrayState, String)>) -> bool {
         return false;
     };
     let (state, text) = tray_status(app);
-    if shown.as_ref().is_some_and(|(s, t)| *s == state && *t == text) {
-        return false;
+    let drawn = shown.replace((state, text.clone()));
+    match &drawn {
+        Some((s, t)) if *s == state && *t == text => return false,
+        // Only the words changed, such as a pause's time left: the icon
+        // stays, and the theme need not be asked.
+        Some((s, _)) if *s == state => {
+            let _ = tray.set_tooltip(Some(format!("Viary: {text}")));
+            return false;
+        }
+        _ => {}
     }
     let dark = dark_tray();
-    let drawn = shown.replace((state, text.clone()));
     let Look { ink, badge, struck, template } = look(state, dark);
     // Linux shows no tooltip, and each icon is a file the shell reads:
     // only a new look is written.
