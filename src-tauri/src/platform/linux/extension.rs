@@ -25,7 +25,8 @@ use zbus::proxy::CacheProperties;
 use super::hotkey::{self, HotkeyEvent};
 use crate::{
     App,
-    dictation::{Msg, PillAction, PillView},
+    // Not `PillAction` by name: the proxy below defines one for its signal.
+    dictation::{self, Msg, PillView},
     lock,
 };
 
@@ -328,7 +329,7 @@ async fn follow(app: &AppHandle) -> zbus::Result<()> {
             }
             Some(action) = actions.next() => {
                 let Ok(args) = action.args() else { continue };
-                match serde_json::from_value::<PillAction>(serde_json::Value::String(args.action)) {
+                match serde_json::from_value::<dictation::PillAction>(serde_json::Value::String(args.action)) {
                     Ok(action) => app.state::<App>().send(Msg::Pill(action)),
                     Err(error) => tracing::warn!(%error, "unknown pill action from GNOME Shell"),
                 }
