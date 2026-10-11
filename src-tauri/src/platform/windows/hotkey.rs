@@ -23,8 +23,7 @@ use windows::Win32::{
     Foundation::{LPARAM, LRESULT, WPARAM},
     UI::{
         Input::KeyboardAndMouse::{
-            GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
-            KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
+            INPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
             VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
         },
         WindowsAndMessaging::{
@@ -36,6 +35,7 @@ use windows::Win32::{
     },
 };
 
+use super::{is_down, key_input};
 use crate::settings::Hotkey;
 
 /// What the listener reports.
@@ -129,17 +129,23 @@ impl Held {
         }
     }
 
+    /// Forgets every modifier Windows no longer reports down, for when the
+    /// hook may have missed key-ups: Windows removes a slow hook without a
+    /// word, and a removed hook hears nothing. True if the hotkey came up.
+    fn settle(&mut self, key: Key, is_down: impl Fn(VIRTUAL_KEY) -> bool) -> bool {
+        // No key is being reported: every modifier is asked about.
+        self.forget_released(VIRTUAL_KEY(0), is_down);
+        let released = self.hotkey && !self.of(key);
+        if released {
+            self.hotkey = false;
+        }
+        released
+    }
+
     /// Whether any key the hotkeys use is down.
     fn any(&self) -> bool {
         self.hotkey || self.right_alt || self.ctrl.contains(&true) || self.win.contains(&true)
     }
-}
-
-/// Whether Windows reports `vk` down. Inside the hook this is the state
-/// before the key being reported.
-fn is_down(vk: VIRTUAL_KEY) -> bool {
-    // SAFETY: a plain query.
-    unsafe { GetAsyncKeyState(i32::from(vk.0)) < 0 }
 }
 
 struct Hook {
@@ -196,19 +202,6 @@ fn observe(hook: &Hook, vk: VIRTUAL_KEY, down: bool) {
     drop(held);
     if let Some(event) = event {
         let _ = hook.events.send(event);
-    }
-}
-
-fn key_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: vk,
-                dwFlags: flags,
-                ..Default::default()
-            },
-        },
     }
 }
 
@@ -296,8 +289,21 @@ pub fn ctrl_held() -> bool {
 }
 
 /// Whether a key the hotkeys use is down, so the hook must stay as it is.
+/// Windows is asked, not only the hook: a hook removed while a key was
+/// held saw no release, and would otherwise never be installed again. A
+/// hotkey whose release it missed is reported up.
 fn keys_held() -> bool {
-    HOOK.get().is_some_and(|hook| hook.held().any())
+    let Some(hook) = HOOK.get() else {
+        return false;
+    };
+    let mut held = hook.held();
+    let released = held.settle(decode(hook.hotkey.load(Ordering::Relaxed)), is_down);
+    let any = held.any();
+    drop(held);
+    if released {
+        let _ = hook.events.send(HotkeyEvent::Up);
+    }
+    any
 }
 
 fn run(active: &AtomicBool) {
@@ -379,5 +385,18 @@ mod tests {
         // recorded it yet.
         held.forget_released(VK_LWIN, |_| false);
         assert!(held.win[0]);
+    }
+
+    #[test]
+    fn a_hotkey_released_while_the_hook_was_gone_comes_up() {
+        let mut held = Held::default();
+        held.track(VK_RMENU, true);
+        held.hotkey = true;
+        // Still down: nothing changes.
+        assert!(!held.settle(Key::RightAlt, |vk| vk == VK_RMENU));
+        assert!(held.hotkey);
+        // Let go while no hook heard it.
+        assert!(held.settle(Key::RightAlt, |_| false));
+        assert!(!held.any());
     }
 }

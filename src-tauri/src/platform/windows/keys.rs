@@ -7,10 +7,11 @@ use std::time::{Duration, Instant};
 
 use tauri::AppHandle;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
-    KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RMENU,
-    VK_RSHIFT, VK_RWIN,
+    INPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LMENU,
+    VK_LSHIFT, VK_LWIN, VK_RMENU, VK_RSHIFT, VK_RWIN,
 };
+
+use super::{is_down, key_input};
 
 /// Keys that would turn Ctrl+V into another shortcut while held: the app
 /// would get Ctrl+Win+V, or Ctrl+Alt+V (AltGr+V on many layouts). The talk
@@ -38,16 +39,7 @@ fn keys_released() -> bool {
 }
 
 fn key(vk: VIRTUAL_KEY, up: bool) -> INPUT {
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: vk,
-                dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
-                ..Default::default()
-            },
-        },
-    }
+    key_input(vk, if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) })
 }
 
 fn send(inputs: &[INPUT]) -> Result<(), String> {
@@ -59,11 +51,6 @@ fn send(inputs: &[INPUT]) -> Result<(), String> {
         // Blocked by UIPI: the window in front runs as administrator.
         Err(windows::core::Error::from_win32().to_string())
     }
-}
-
-fn is_down(vk: VIRTUAL_KEY) -> bool {
-    // SAFETY: a plain query.
-    unsafe { GetAsyncKeyState(i32::from(vk.0)) < 0 }
 }
 
 fn control(letter: u8) -> Result<(), String> {

@@ -10,6 +10,7 @@ use std::{
 use windows::{
     Win32::{
         Foundation::{CloseHandle, ERROR_ACCESS_DENIED, HANDLE, HWND},
+        Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
         Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
         Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW},
         System::Threading::{
@@ -59,12 +60,33 @@ const SHELL: &[&str] = &[
     "Windows.UI.Core.CoreWindow",
 ];
 
+/// Whether DWM hides `window` though it counts as visible: a suspended
+/// Store app's frame, or a window on another virtual desktop.
+fn is_cloaked(window: HWND) -> bool {
+    let mut cloaked = 0_u32;
+    // SAFETY: a DWORD attribute read into a DWORD, with its size.
+    let read = unsafe {
+        DwmGetWindowAttribute(
+            window,
+            DWMWA_CLOAKED,
+            (&raw mut cloaked).cast(),
+            size_of::<u32>() as u32,
+        )
+    };
+    read.is_ok() && cloaked != 0
+}
+
 /// Whether `window` is an app window someone could be typing into, and
-/// not a tray menu's hidden owner, the pill, or the shell.
+/// not a tray menu's hidden owner, the pill, the shell, or a window no one
+/// can see.
 fn is_app_window(window: HWND) -> bool {
     // SAFETY: plain queries on a window handle; the class buffer is a local.
     unsafe {
-        if window.is_invalid() || !IsWindowVisible(window).as_bool() || IsIconic(window).as_bool() {
+        if window.is_invalid()
+            || !IsWindowVisible(window).as_bool()
+            || IsIconic(window).as_bool()
+            || is_cloaked(window)
+        {
             return false;
         }
         let style = GetWindowLongW(window, GWL_EXSTYLE).cast_unsigned();
@@ -212,8 +234,11 @@ pub fn is_protected(target: &TargetApp) -> bool {
         if elevated(GetCurrentProcess()) {
             return false;
         }
-        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, target.pid.cast_unsigned()) else {
-            return false;
+        // A process Viary may not even look at keeps its keystrokes out
+        // too, as elevated() counts it.
+        let process = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, target.pid.cast_unsigned()) {
+            Ok(process) => process,
+            Err(error) => return error.code() == ERROR_ACCESS_DENIED.to_hresult(),
         };
         let protected = elevated(process);
         let _ = CloseHandle(process);

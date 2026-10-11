@@ -224,13 +224,15 @@ fn sentence(text: &str) -> String {
 
 /// The microphones as last listed. When that list is a few seconds old,
 /// they are listed again on another thread, and the menu is rebuilt if
-/// they changed.
+/// they changed. Not while a dictation is under way: Linux rebuilds the
+/// menu with every state change, and listing probes every ALSA device just
+/// as the dictation opens one.
 fn microphones(app: &AppHandle) -> Vec<String> {
     let (list, stale) = {
         let cached = lock(&MICROPHONES);
         (cached.0.clone(), cached.1.is_none_or(|at| at.elapsed() > LIST_EVERY))
     };
-    if stale && !LISTING.swap(true, Ordering::SeqCst) {
+    if stale && ui::dictation_idle() && !LISTING.swap(true, Ordering::SeqCst) {
         let app = app.clone();
         std::thread::spawn(move || {
             let names: Vec<String> = crate::recording::Recording::microphones()
